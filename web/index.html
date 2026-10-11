@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#1e1e1e" />
+    <title>CodeEditor Mobile</title>
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+          <span>EXPLORADOR</span>
+          <button id="btnNewFile" class="icon-btn small" title="Novo arquivo" aria-label="Novo arquivo">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </button>
+        </div>
+        <ul id="fileList" class="file-list"></ul>
+      </aside>
+      <div id="overlay" class="overlay"></div>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button id="btnToggleSidebar" class="icon-btn" title="Explorador" aria-label="Explorador">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+          </button>
+          <div class="breadcrumb" id="breadcrumb">Nenhum arquivo aberto</div>
+          <div class="top-actions">
+            <div id="customTopActions" class="custom-top-actions"></div>
+            <button id="btnSettings" class="icon-btn" title="Configurações" aria-label="Configurações" aria-haspopup="dialog">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--bg-titlebar)"/><circle cx="15" cy="17" r="3" fill="var(--bg-titlebar)"/></svg>
+            </button>
+            <button id="btnDownload" class="icon-btn" title="Baixar arquivo" aria-label="Baixar arquivo">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button id="btnSave" class="icon-btn" title="Salvar arquivo" aria-label="Salvar arquivo">
+              <span aria-hidden="true">💾</span>
+            </button>
+            <button id="btnRun" class="icon-btn" title="Executar" aria-label="Executar">
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div id="tabbar" class="tabbar"></div>
+
+        <div class="editor-body">
+          <div id="gutter" class="gutter"></div>
+          <div class="code-area">
+            <pre id="highlight" class="code-pre"><code id="highlightCode"></code></pre>
+            <textarea id="codeInput" class="code-input" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" placeholder="Abra ou crie um arquivo para começar a editar..."></textarea>
+            <div id="autocomplete" class="autocomplete hidden" role="listbox" aria-label="Sugestões de código"></div>
+          </div>
+        </div>
+
+        <div id="problemsPanel" class="problems-panel hidden">
+          <div class="problems-header">
+            <span>PROBLEMAS</span>
+            <button id="btnCloseProblems" class="icon-btn small" aria-label="Fechar problemas">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+            </button>
+          </div>
+          <ul id="problemsList" class="problems-list"></ul>
+        </div>
+
+        <div id="outputPanel" class="output-panel hidden">
+          <div class="output-header">
+            <span>SAÍDA</span>
+            <button id="btnCloseOutput" class="icon-btn small" aria-label="Fechar saída">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+            </button>
+          </div>
+          <pre id="outputContent" class="output-content"></pre>
+        </div>
+
+        <div id="terminalPanel" class="terminal-panel hidden">
+          <div class="output-header">
+            <span>TERMINAL</span>
+            <button id="btnCloseTerminal" class="icon-btn small" aria-label="Fechar terminal">×</button>
+          </div>
+          <pre id="terminalOutput" class="terminal-output"></pre>
+          <form id="terminalForm" class="terminal-form">
+            <span class="terminal-prompt">$</span>
+            <input id="terminalInput" class="terminal-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="comando..." />
+          </form>
+        </div>
+
+        <div id="previewPanel" class="preview-panel hidden">
+          <div class="preview-header">
+            <span>PREVIEW <span id="previewTitle"></span></span>
+            <button id="btnClosePreview" class="icon-btn small" aria-label="Fechar preview HTML">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+            </button>
+          </div>
+          <iframe id="htmlPreview" class="html-preview" title="Preview HTML" sandbox="allow-scripts allow-modals"></iframe>
+        </div>
+
+        <footer class="statusbar">
+          <button id="langPill" class="lang-pill">—</button>
+          <button id="problemsStatus" class="problems-status" title="Mostrar problemas" aria-label="Mostrar problemas">✓ 0</button>
+          <span class="status-spacer"></span>
+          <span id="cursorPos">Ln 0, Col 0</span>
+          <span class="status-sep">|</span>
+          <span id="indentStatus">Espaços: 4</span>
+          <span class="status-sep">|</span>
+          <span>UTF-8</span>
+        </footer>
+        <div id="shortcutBar" class="shortcut-bar" role="toolbar" aria-label="Atalhos do teclado"></div>
+      </div>
+    </div>
+
+    <div id="langModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <span>Selecionar linguagem</span>
+          <button id="btnCloseLangModal" class="icon-btn small" aria-label="Fechar seleção de linguagem">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+          </button>
+        </div>
+        <ul id="langList" class="lang-list"></ul>
+        <p class="modal-hint">Novas linguagens também podem ser registradas em tempo de execução com <code>CodeEditorAPI.addLanguage()</code>.</p>
+      </div>
+    </div>
+    <div id="pluginModal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-header"><span>Plugins instalados</span><button id="btnClosePluginModal" class="icon-btn small" aria-label="Fechar plugins">×</button></div>
+        <ul id="pluginList" class="lang-list"></ul>
+        <p class="modal-hint">Plugins ativos podem adicionar linguagens, comandos e ações ao editor.</p>
+      </div>
+    </div>
+
+    <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle" aria-describedby="settingsDescription">
+      <header class="settings-header">
+        <div><span class="settings-eyebrow">SEU ESPAÇO DE TRABALHO</span><h1 id="settingsTitle">Configurações</h1>
+          <p id="settingsDescription">Deixe o editor do seu jeito.</p></div>
+        <button id="btnCloseSettings" class="icon-btn" aria-label="Fechar configurações" autofocus>×</button>
+      </header>
+      <div class="settings-content">
+        <section class="settings-section" aria-labelledby="appearanceTitle">
+          <h2 id="appearanceTitle">Aparência</h2>
+          <label class="settings-row" for="settingTheme"><span>Tema<small>Cores da interface e do código</small></span>
+            <select id="settingTheme" data-setting="theme"><option value="dark">Escuro</option><option value="light">Claro</option><option value="system">Sistema</option></select></label>
+          <div class="settings-preview" aria-label="Prévia da aparência do editor">
+            <div class="settings-preview-title"><span class="settings-dot"></span> exemplo.py <span>PRÉVIA</span></div>
+            <pre><span class="preview-line-number">1  </span><span class="tok-keyword">def</span> <span class="tok-function">saudacao</span>():
+<span class="preview-line-number">2  </span>    <span class="tok-keyword">return</span> <span class="tok-string">"Olá, mundo!"</span></pre>
+          </div>
+          <label class="settings-row settings-range" for="settingFontSize"><span>Fonte do editor <output id="fontSizeValue" for="settingFontSize"></output></span>
+            <input id="settingFontSize" data-setting="fontSize" type="range" min="12" max="24" step="0.5" /></label>
+          <label class="settings-row" for="settingLineHeight"><span>Espaçamento entre linhas</span>
+            <select id="settingLineHeight" data-setting="lineHeight"><option value="1.4">Compacto</option><option value="1.55">Padrão</option><option value="1.8">Confortável</option><option value="2">Amplo</option></select></label>
+          <label class="settings-row settings-range" for="settingTerminalFontSize"><span>Fonte do terminal <output id="terminalFontSizeValue" for="settingTerminalFontSize"></output></span>
+            <input id="settingTerminalFontSize" data-setting="terminalFontSize" type="range" min="12" max="20" step="1" /></label>
+        </section>
+        <section class="settings-section" aria-labelledby="editingTitle">
+          <h2 id="editingTitle">Edição</h2>
+          <label class="settings-row" for="settingTabSize"><span>Indentação<small>Usada pela tecla Tab e pelos atalhos</small></span>
+            <select id="settingTabSize" data-setting="tabSize"><option value="2">2 espaços</option><option value="4">4 espaços</option><option value="8">8 espaços</option></select></label>
+          <label class="settings-row" for="settingLineNumbers"><span>Números de linha</span><input id="settingLineNumbers" data-setting="lineNumbers" type="checkbox" role="switch" /></label>
+          <label class="settings-row" for="settingAutocomplete"><span>Sugestões automáticas<small>Ctrl + Espaço continua disponível</small></span><input id="settingAutocomplete" data-setting="autocomplete" type="checkbox" role="switch" /></label>
+          <label class="settings-row" for="settingAutoPairs"><span>Fechar pares automaticamente<small>Parênteses, colchetes, chaves e aspas</small></span><input id="settingAutoPairs" data-setting="autoPairs" type="checkbox" role="switch" /></label>
+          <label class="settings-row" for="settingShortcuts"><span>Barra de atalhos<small>Teclas extras na parte inferior</small></span><input id="settingShortcuts" data-setting="shortcuts" type="checkbox" role="switch" /></label>
+        </section>
+      </div>
+      <footer class="settings-footer"><span id="settingsSaveStatus" role="status">Preferências salvas neste dispositivo</span><button id="btnResetSettings" class="settings-reset" type="button">Restaurar padrão</button></footer>
+    </dialog>
+
+    <script type="module" src="/src/main.js"></script>
+    <input id="pluginZipInput" type="file" accept=".zip,application/zip" multiple hidden />
+  </body>
+</html>

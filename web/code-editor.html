@@ -1,0 +1,688 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#1e1e1e" />
+<title>CodeEditor Mobile</title>
+<style>
+:root{
+  --bg-app:#1e1e1e;
+  --bg-sidebar:#252526;
+  --bg-titlebar:#323233;
+  --bg-tab-active:#1e1e1e;
+  --bg-tab-inactive:#2d2d2d;
+  --bg-statusbar:#007acc;
+  --border-color:#3c3c3c;
+  --text:#d4d4d4;
+  --text-muted:#8a8a8a;
+  --text-dim:#6e7681;
+  --accent:#007acc;
+  --accent-soft:#264f78;
+  --tok-keyword:#569cd6;
+  --tok-string:#ce9178;
+  --tok-comment:#6a9955;
+  --tok-number:#b5cea8;
+  --tok-type:#4ec9b0;
+  --tok-function:#dcdcaa;
+  --tok-annotation:#d7ba7d;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-code: 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+*{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+html,body{ height:100%; }
+body{
+  margin:0; background:var(--bg-app); color:var(--text); font-family:var(--font-ui);
+  overflow:hidden; user-select:none; -webkit-user-select:none;
+}
+#app{ position:fixed; inset:0; display:flex; height:100vh; height:100dvh; }
+
+/* ---------- Sidebar ---------- */
+.sidebar{
+  position:fixed; top:0; bottom:0; left:0; width:78%; max-width:280px;
+  background:var(--bg-sidebar); z-index:40; transform:translateX(-100%);
+  transition:transform .22s ease; display:flex; flex-direction:column;
+  border-right:1px solid var(--border-color);
+  padding-top:var(--safe-top);
+  padding-bottom:var(--safe-bottom);
+  padding-left:var(--safe-left);
+}
+.sidebar.open{ transform:translateX(0); }
+.sidebar-header{
+  display:flex; align-items:center; justify-content:space-between;
+  padding:14px 12px 10px; font-size:11px; letter-spacing:.08em;
+  color:var(--text-muted); font-weight:700;
+}
+.file-list{ list-style:none; margin:0; padding:4px 0; overflow-y:auto; flex:1; }
+.file-item{ display:flex; align-items:center; gap:8px; padding:9px 10px 9px 12px; font-size:13.5px; }
+.file-item.active{ background:#37373d; }
+.file-item .file-icon{
+  width:17px; height:17px; flex:none; border-radius:3px; color:#fff;
+  font-size:9px; font-weight:700; display:flex; align-items:center; justify-content:center;
+}
+.file-item .file-name{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.file-item .file-delete{ opacity:.55; background:none; border:none; color:var(--text-muted); font-size:15px; padding:6px; line-height:1; }
+.file-empty{ padding:16px 14px; color:var(--text-muted); font-size:12.5px; }
+.overlay{ position:fixed; inset:0; background:rgba(0,0,0,.45); opacity:0; pointer-events:none; transition:opacity .2s; z-index:30; }
+.overlay.show{ opacity:1; pointer-events:auto; }
+
+/* ---------- Workspace ---------- */
+.workspace{ flex:1; display:flex; flex-direction:column; min-width:0; height:100%; }
+
+.topbar{
+  display:flex; align-items:center; gap:2px; height:calc(46px + var(--safe-top));
+  padding:var(--safe-top) max(4px, var(--safe-right)) 0 max(4px, var(--safe-left));
+  background:var(--bg-titlebar); border-bottom:1px solid var(--border-color); flex:none;
+}
+.breadcrumb{ flex:1; font-size:12.5px; color:var(--text-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding:0 4px; }
+.top-actions{ display:flex; gap:2px; }
+.icon-btn{
+  background:none; border:none; color:var(--text); width:34px; height:34px;
+  display:flex; align-items:center; justify-content:center; border-radius:5px;
+  padding:0; touch-action:manipulation;
+}
+.icon-btn:active{ background:rgba(255,255,255,.12); }
+.icon-btn svg{ width:18px; height:18px; }
+.icon-btn.small{ width:26px; height:26px; }
+.icon-btn.small svg{ width:13px; height:13px; }
+.icon-btn:disabled{ opacity:.35; }
+
+.tabbar{ display:flex; overflow-x:auto; background:var(--bg-tab-inactive); flex:none; scrollbar-width:none; }
+.tabbar::-webkit-scrollbar{ display:none; }
+.tab{
+  display:flex; align-items:center; gap:7px; padding:0 8px 0 12px; height:36px;
+  font-size:12.5px; background:var(--bg-tab-inactive); border-right:1px solid var(--border-color);
+  color:var(--text-muted); white-space:nowrap; flex:none;
+}
+.tab.active{ background:var(--bg-tab-active); color:var(--text); box-shadow:inset 0 -2px 0 var(--accent); }
+.tab .tab-close{ background:none; border:none; color:inherit; opacity:.65; font-size:14px; padding:4px; line-height:1; }
+
+.editor-body{ flex:1; display:flex; min-height:0; background:var(--bg-app); }
+.gutter{
+  flex:none; overflow:hidden; padding:8px 8px 40px 10px; text-align:right;
+  color:var(--text-dim); font:13.5px/1.55 var(--font-code); background:var(--bg-app);
+  min-width:34px; white-space:pre;
+}
+.code-area{ position:relative; flex:1; min-width:0; overflow:hidden; }
+.code-pre, .code-input{
+  position:absolute; inset:0; margin:0; padding:8px 14px 40px 6px;
+  font:13.5px/1.55 var(--font-code); white-space:pre; overflow:auto;
+  box-sizing:border-box; tab-size:4;
+}
+.code-pre{ color:var(--text); pointer-events:none; }
+.code-pre code{ font:inherit; }
+.code-input{
+  color:transparent; background:transparent; -webkit-text-fill-color:transparent;
+  caret-color:#aeafad; border:none; outline:none; resize:none; z-index:2;
+  user-select:text; -webkit-user-select:text;
+}
+.code-input::placeholder{ -webkit-text-fill-color:var(--text-muted); color:var(--text-muted); }
+.code-input::selection{ background:var(--accent-soft); -webkit-text-fill-color:#fff; color:#fff; }
+.code-input:disabled{ pointer-events:none; }
+
+.tok-comment{ color:var(--tok-comment); font-style:italic; }
+.tok-string{ color:var(--tok-string); }
+.tok-number{ color:var(--tok-number); }
+.tok-keyword{ color:var(--tok-keyword); }
+.tok-literal{ color:var(--tok-keyword); }
+.tok-type{ color:var(--tok-type); }
+.tok-function{ color:var(--tok-function); }
+.tok-annotation{ color:var(--tok-annotation); }
+
+.output-panel{ flex:none; max-height:34%; display:flex; flex-direction:column; background:#181818; border-top:1px solid var(--border-color); }
+.output-panel.hidden{ display:none; }
+.output-header{
+  display:flex; align-items:center; justify-content:space-between; padding:6px 10px;
+  font-size:10.5px; letter-spacing:.08em; color:var(--text-muted); font-weight:700;
+}
+.output-content{ margin:0; padding:0 14px 14px; font:12px/1.6 var(--font-code); color:#c9c9c9; overflow:auto; white-space:pre-wrap; }
+
+.statusbar{
+  flex:none; min-height:calc(26px + var(--safe-bottom)); background:var(--bg-statusbar); display:flex; align-items:center;
+  gap:8px; padding:0 max(10px, var(--safe-right)) var(--safe-bottom) max(10px, var(--safe-left)); font-size:11.5px; color:#fff;
+}
+.lang-pill{ background:none; border:none; color:#fff; font-size:11.5px; padding:4px 2px; font-weight:700; touch-action:manipulation; }
+.status-spacer{ flex:1; }
+.status-sep{ opacity:.5; }
+
+.modal{ position:fixed; inset:0; background:rgba(0,0,0,.5); display:flex; align-items:flex-end; z-index:50; }
+.modal.hidden{ display:none; }
+.modal-card{ width:100%; background:#252526; border-radius:14px 14px 0 0; padding:14px var(--safe-right) max(14px, var(--safe-bottom)) var(--safe-left); max-height:70vh; display:flex; flex-direction:column; }
+.modal-header{ display:flex; justify-content:space-between; align-items:center; padding:0 16px 12px; font-size:13px; font-weight:700; border-bottom:1px solid var(--border-color); margin-bottom:6px; }
+.lang-list{ list-style:none; margin:0; padding:2px 0; overflow-y:auto; }
+.lang-item{ display:flex; align-items:center; gap:10px; padding:12px 16px; font-size:14px; }
+.lang-item.active{ color:#4fc1ff; }
+.modal-hint{ font-size:11.5px; color:var(--text-muted); padding:10px 16px 2px; margin:0; line-height:1.5; }
+.modal-hint code{ background:#1e1e1e; padding:1px 5px; border-radius:4px; font-family:var(--font-code); }
+
+.hidden{ display:none !important; }
+
+@media (min-width: 760px){
+  .sidebar{ position:relative; transform:none; width:250px; max-width:none; }
+  .overlay{ display:none; }
+  #btnToggleSidebar{ display:none; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <span>EXPLORADOR</span>
+      <button id="btnNewFile" class="icon-btn small" title="Novo arquivo">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      </button>
+    </div>
+    <ul id="fileList" class="file-list"></ul>
+  </aside>
+  <div id="overlay" class="overlay"></div>
+
+  <div class="workspace">
+    <header class="topbar">
+      <button id="btnToggleSidebar" class="icon-btn" title="Explorador">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+      </button>
+      <div class="breadcrumb" id="breadcrumb">Nenhum arquivo aberto</div>
+      <div class="top-actions">
+        <button id="btnDownload" class="icon-btn" title="Baixar arquivo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        </button>
+        <button id="btnRun" class="icon-btn" title="Executar">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div id="tabbar" class="tabbar"></div>
+
+    <div class="editor-body">
+      <div id="gutter" class="gutter"></div>
+      <div class="code-area">
+        <pre id="highlight" class="code-pre"><code id="highlightCode"></code></pre><textarea id="codeInput" class="code-input" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off" placeholder="Abra ou crie um arquivo para começar a editar..."></textarea>
+      </div>
+    </div>
+
+    <div id="outputPanel" class="output-panel hidden">
+      <div class="output-header">
+        <span>SAÍDA</span>
+        <button id="btnCloseOutput" class="icon-btn small">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+        </button>
+      </div>
+      <pre id="outputContent" class="output-content"></pre>
+    </div>
+
+    <footer class="statusbar">
+      <button id="langPill" class="lang-pill">—</button>
+      <span class="status-spacer"></span>
+      <span id="cursorPos">Ln 0, Col 0</span>
+      <span class="status-sep">|</span>
+      <span>Espaços: 4</span>
+      <span class="status-sep">|</span>
+      <span>UTF-8</span>
+    </footer>
+  </div>
+</div>
+
+<div id="langModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span>Selecionar linguagem</span>
+      <button id="btnCloseLangModal" class="icon-btn small">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/></svg>
+      </button>
+    </div>
+    <ul id="langList" class="lang-list"></ul>
+    <p class="modal-hint">Para dar suporte a uma nova linguagem, adicione uma entrada no objeto <code>LANGUAGES</code> no início do &lt;script&gt;. O destacador de sintaxe é genérico e passa a reconhecê-la automaticamente.</p>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  /* ============================================================
+     LINGUAGENS SUPORTADAS
+     Para adicionar uma nova linguagem, inclua uma nova chave aqui
+     seguindo o mesmo formato (keywords, literals, types, etc).
+     O tokenizador abaixo é genérico: nenhuma outra parte do
+     código precisa mudar para reconhecer a linguagem nova.
+  ============================================================ */
+  var LANGUAGES = {
+    java: {
+      id: 'java',
+      label: 'Java',
+      badge: 'J',
+      color: '#3a7ca8',
+      fileExt: '.java',
+      lineComment: '//',
+      blockComment: ['/*', '*/'],
+      keywords: ['abstract','assert','boolean','break','byte','case','catch','char','class','const','continue','default','do','double','else','enum','extends','final','finally','float','for','goto','if','implements','import','instanceof','int','interface','long','native','new','package','private','protected','public','record','return','sealed','short','static','strictfp','super','switch','synchronized','this','throw','throws','transient','try','var','void','volatile','while','yield','permits'],
+      literals: ['true','false','null'],
+      types: ['String','Integer','Double','Float','Long','Short','Byte','Character','Boolean','Object','List','ArrayList','LinkedList','Map','HashMap','TreeMap','Set','HashSet','Void','Number','StringBuilder','StringBuffer','Optional','Exception','RuntimeException','Thread','Comparable','Iterable','Iterator']
+    }
+    /* Exemplo de como o Python poderia ser adicionado no futuro:
+    ,python: {
+      id: 'python', label: 'Python', badge: 'Py', color: '#4b8bbe', fileExt: '.py',
+      lineComment: '#', blockComment: null,
+      keywords: ['def','class','return','if','elif','else','for','while','import','from','as','with','try','except','finally','raise','pass','break','continue','lambda','yield','in','is','not','and','or','global','nonlocal','del'],
+      literals: ['True','False','None'],
+      types: ['int','str','float','bool','list','dict','set','tuple','object']
+    }
+    */
+  };
+
+  function escapeRe(s){ return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  function escapeHtml(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  /* Tokenizador genérico: funciona para qualquer entrada em LANGUAGES */
+  function tokenize(code, lang){
+    var kw = {}, lit = {}, types = {};
+    (lang.keywords || []).forEach(function(k){ kw[k] = true; });
+    (lang.literals || []).forEach(function(k){ lit[k] = true; });
+    (lang.types || []).forEach(function(k){ types[k] = true; });
+
+    var pieces = [];
+    if (lang.blockComment) pieces.push(escapeRe(lang.blockComment[0]) + '[\\s\\S]*?' + escapeRe(lang.blockComment[1]));
+    if (lang.lineComment) pieces.push(escapeRe(lang.lineComment) + '[^\\n]*');
+    pieces.push(/"(?:\\.|[^"\\\n])*"/.source);
+    pieces.push(/'(?:\\.|[^'\\\n])*'/.source);
+    pieces.push(/@[A-Za-z_]\w*/.source);
+    pieces.push(/\b\d+\.?\d*[a-zA-Z]?\b/.source);
+    pieces.push(/[A-Za-z_$][A-Za-z0-9_$]*/.source);
+    pieces.push(/[^\sA-Za-z0-9_$]/.source);
+    pieces.push(/\s+/.source);
+
+    var re = new RegExp(pieces.join('|'), 'g');
+    var out = '';
+    var m;
+    while ((m = re.exec(code)) !== null) {
+      var tok = m[0];
+      var cls = null;
+      if (lang.blockComment && tok.indexOf(lang.blockComment[0]) === 0) cls = 'tok-comment';
+      else if (lang.lineComment && tok.indexOf(lang.lineComment) === 0) cls = 'tok-comment';
+      else if (tok[0] === '"' || tok[0] === "'") cls = 'tok-string';
+      else if (tok[0] === '@') cls = 'tok-annotation';
+      else if (/^\d/.test(tok)) cls = 'tok-number';
+      else if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(tok)) {
+        if (kw[tok]) cls = 'tok-keyword';
+        else if (lit[tok]) cls = 'tok-literal';
+        else if (types[tok] || /^[A-Z]/.test(tok)) cls = 'tok-type';
+        else {
+          var rest = code.slice(m.index + tok.length);
+          if (/^\s*\(/.test(rest)) cls = 'tok-function';
+        }
+      }
+      out += cls ? '<span class="' + cls + '">' + escapeHtml(tok) + '</span>' : escapeHtml(tok);
+      if (m.index === re.lastIndex) re.lastIndex++;
+    }
+    return out;
+  }
+
+  /* ============================================================
+     ARQUIVOS DE EXEMPLO
+  ============================================================ */
+  var SAMPLE_MAIN = [
+    'package com.example.app;',
+    '',
+    'import java.util.*;',
+    '',
+    '/**',
+    ' * Classe de entrada - demonstra o destaque de sintaxe.',
+    ' */',
+    'public class Main {',
+    '    private static final String GREETING = "Hello, World!";',
+    '',
+    '    public static void main(String[] args) {',
+    '        List<String> names = new ArrayList<>();',
+    '        names.add("Ana");',
+    '        names.add("Bruno");',
+    '',
+    '        for (String name : names) {',
+    '            System.out.println(GREETING + " " + name);',
+    '        }',
+    '',
+    '        int total = Calculator.sum(10, 32);',
+    '        System.out.println("Total: " + total);',
+    '    }',
+    '}',
+    ''
+  ].join('\n');
+
+  var SAMPLE_CALC = [
+    'package com.example.app;',
+    '',
+    '// Operacoes matematicas simples',
+    'public class Calculator {',
+    '',
+    '    public static int sum(int a, int b) {',
+    '        return a + b;',
+    '    }',
+    '',
+    '    public static int multiply(int a, int b) {',
+    '        return a * b;',
+    '    }',
+    '',
+    '    public static double average(int[] values) {',
+    '        int total = 0;',
+    '        for (int v : values) {',
+    '            total += v;',
+    '        }',
+    '        return (double) total / values.length;',
+    '    }',
+    '}',
+    ''
+  ].join('\n');
+
+  /* ============================================================
+     ESTADO
+  ============================================================ */
+  var state = {
+    files: {
+      'Main.java': { language: 'java', content: SAMPLE_MAIN },
+      'Calculator.java': { language: 'java', content: SAMPLE_CALC }
+    },
+    order: ['Main.java', 'Calculator.java'],
+    openTabs: ['Main.java'],
+    activeFile: 'Main.java'
+  };
+
+  /* ============================================================
+     ELEMENTOS
+  ============================================================ */
+  function $(id){ return document.getElementById(id); }
+  var sidebar = $('sidebar');
+  var overlay = $('overlay');
+  var fileList = $('fileList');
+  var tabbar = $('tabbar');
+  var breadcrumb = $('breadcrumb');
+  var gutter = $('gutter');
+  var codeInput = $('codeInput');
+  var highlightPre = $('highlight');
+  var highlightCode = $('highlightCode');
+  var cursorPos = $('cursorPos');
+  var langPill = $('langPill');
+  var langModal = $('langModal');
+  var langList = $('langList');
+  var outputPanel = $('outputPanel');
+  var outputContent = $('outputContent');
+
+  /* ============================================================
+     RENDER
+  ============================================================ */
+  function fileIcon(langId){
+    var lang = LANGUAGES[langId] || { badge:'?', color:'#555' };
+    return '<span class="file-icon" style="background:' + lang.color + '">' + lang.badge + '</span>';
+  }
+
+  function renderSidebar(){
+    if (state.order.length === 0) {
+      fileList.innerHTML = '<li class="file-empty">Nenhum arquivo ainda. Toque em + para criar um.</li>';
+      return;
+    }
+    fileList.innerHTML = state.order.map(function(name){
+      var f = state.files[name];
+      var active = name === state.activeFile ? 'active' : '';
+      return '<li class="file-item ' + active + '" data-file="' + name + '">' +
+        fileIcon(f.language) +
+        '<span class="file-name">' + escapeHtml(name) + '</span>' +
+        '<button class="file-delete" data-delete="' + name + '">\u2715</button>' +
+      '</li>';
+    }).join('');
+  }
+
+  function renderTabs(){
+    tabbar.innerHTML = state.openTabs.map(function(name){
+      var active = name === state.activeFile ? 'active' : '';
+      return '<div class="tab ' + active + '" data-file="' + name + '">' +
+        '<span class="tab-name">' + escapeHtml(name) + '</span>' +
+        '<button class="tab-close" data-close="' + name + '">\u2715</button>' +
+      '</div>';
+    }).join('');
+  }
+
+  function renderEditor(){
+    var name = state.activeFile;
+    var f = name ? state.files[name] : null;
+    breadcrumb.textContent = name ? name : 'Nenhum arquivo aberto';
+
+    if (!f) {
+      codeInput.value = '';
+      codeInput.disabled = true;
+      highlightCode.innerHTML = '';
+      gutter.textContent = '';
+      langPill.textContent = '\u2014';
+      cursorPos.textContent = 'Ln 0, Col 0';
+      return;
+    }
+    codeInput.disabled = false;
+    codeInput.value = f.content;
+    var lang = LANGUAGES[f.language] || LANGUAGES.java;
+    langPill.textContent = lang.label;
+    refreshHighlight();
+    updateCursor();
+  }
+
+  function refreshHighlight(){
+    var name = state.activeFile;
+    if (!name) return;
+    var f = state.files[name];
+    var lang = LANGUAGES[f.language] || LANGUAGES.java;
+    highlightCode.innerHTML = tokenize(f.content, lang) + '\n';
+    var lines = f.content.split('\n').length;
+    var nums = '';
+    for (var i = 1; i <= lines; i++) nums += i + '\n';
+    gutter.textContent = nums;
+    syncScroll();
+  }
+
+  function syncScroll(){
+    highlightPre.scrollTop = codeInput.scrollTop;
+    highlightPre.scrollLeft = codeInput.scrollLeft;
+    gutter.scrollTop = codeInput.scrollTop;
+  }
+
+  function updateCursor(){
+    var pos = codeInput.selectionStart || 0;
+    var before = codeInput.value.slice(0, pos);
+    var line = before.split('\n').length;
+    var col = pos - before.lastIndexOf('\n');
+    cursorPos.textContent = 'Ln ' + line + ', Col ' + col;
+  }
+
+  function renderLangList(){
+    var current = state.activeFile ? state.files[state.activeFile].language : null;
+    var items = [];
+    for (var key in LANGUAGES) {
+      var l = LANGUAGES[key];
+      var active = l.id === current ? 'active' : '';
+      items.push('<li class="lang-item ' + active + '" data-lang="' + l.id + '">' + fileIcon(l.id) + '<span>' + l.label + '</span></li>');
+    }
+    langList.innerHTML = items.join('');
+  }
+
+  /* ============================================================
+     AÇÕES
+  ============================================================ */
+  function openFile(name){
+    if (state.openTabs.indexOf(name) === -1) state.openTabs.push(name);
+    state.activeFile = name;
+    renderSidebar(); renderTabs(); renderEditor();
+    closeSidebar();
+  }
+
+  function closeTab(name){
+    var idx = state.openTabs.indexOf(name);
+    if (idx === -1) return;
+    state.openTabs.splice(idx, 1);
+    if (state.activeFile === name) {
+      state.activeFile = state.openTabs[idx] || state.openTabs[idx - 1] || null;
+    }
+    renderTabs(); renderEditor();
+  }
+
+  function deleteFile(name){
+    if (!confirm('Excluir "' + name + '"?')) return;
+    delete state.files[name];
+    state.order = state.order.filter(function(n){ return n !== name; });
+    if (state.openTabs.indexOf(name) !== -1) closeTab(name);
+    renderSidebar();
+  }
+
+  function createFile(){
+    var name = prompt('Nome do novo arquivo:', 'NovoArquivo.java');
+    if (!name) return;
+    name = name.trim();
+    if (!name) return;
+    if (state.files[name]) { alert('Já existe um arquivo com esse nome.'); return; }
+    var ext = name.indexOf('.') !== -1 ? '.' + name.split('.').pop() : '';
+    var lang = 'java';
+    for (var key in LANGUAGES) { if (LANGUAGES[key].fileExt === ext) lang = key; }
+    state.files[name] = { language: lang, content: '' };
+    state.order.push(name);
+    openFile(name);
+  }
+
+  function downloadFile(){
+    var name = state.activeFile;
+    if (!name) return;
+    var blob = new Blob([state.files[name].content], { type: 'text/plain' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function runFile(){
+    var name = state.activeFile;
+    outputPanel.classList.remove('hidden');
+    if (!name) { outputContent.textContent = 'Nenhum arquivo aberto.'; return; }
+    var lang = LANGUAGES[state.files[name].language] || LANGUAGES.java;
+    var cmd = lang.id === 'java'
+      ? 'javac ' + name + ' && java ' + name.replace(/\.\w+$/, '')
+      : 'run ' + name;
+    outputContent.textContent =
+      '$ ' + cmd + '\n\n' +
+      'Este editor cuida apenas da edição do código - não existe um\n' +
+      'compilador/interpretador embutido nesta página.\n' +
+      'Para executar de verdade, conecte um backend (ex.: um serviço\n' +
+      'que receba o conteúdo do arquivo e rode o compilador correspondente).';
+  }
+
+  function openSidebar(){ sidebar.classList.add('open'); overlay.classList.add('show'); }
+  function closeSidebar(){ sidebar.classList.remove('open'); overlay.classList.remove('show'); }
+  function toggleSidebar(){
+    if (sidebar.classList.contains('open')) closeSidebar(); else openSidebar();
+  }
+
+  function openLangModal(){
+    if (!state.activeFile) return;
+    renderLangList();
+    langModal.classList.remove('hidden');
+  }
+  function closeLangModal(){ langModal.classList.add('hidden'); }
+
+  function insertAtCursor(text, caretOffset){
+    var start = codeInput.selectionStart;
+    var end = codeInput.selectionEnd;
+    var val = codeInput.value;
+    codeInput.value = val.slice(0, start) + text + val.slice(end);
+    var newPos = start + (caretOffset !== undefined ? caretOffset : text.length);
+    codeInput.selectionStart = codeInput.selectionEnd = newPos;
+    codeInput.dispatchEvent(new Event('input'));
+  }
+
+  /* ============================================================
+     EVENTOS
+  ============================================================ */
+  $('btnToggleSidebar').addEventListener('click', toggleSidebar);
+  overlay.addEventListener('click', closeSidebar);
+  $('btnNewFile').addEventListener('click', createFile);
+  $('btnDownload').addEventListener('click', downloadFile);
+  $('btnRun').addEventListener('click', runFile);
+  $('btnCloseOutput').addEventListener('click', function(){ outputPanel.classList.add('hidden'); });
+  langPill.addEventListener('click', openLangModal);
+  $('btnCloseLangModal').addEventListener('click', closeLangModal);
+  langModal.addEventListener('click', function(e){ if (e.target === langModal) closeLangModal(); });
+
+  fileList.addEventListener('click', function(e){
+    var del = e.target.closest('[data-delete]');
+    if (del) { e.stopPropagation(); deleteFile(del.getAttribute('data-delete')); return; }
+    var item = e.target.closest('[data-file]');
+    if (item) openFile(item.getAttribute('data-file'));
+  });
+
+  tabbar.addEventListener('click', function(e){
+    var close = e.target.closest('[data-close]');
+    if (close) { e.stopPropagation(); closeTab(close.getAttribute('data-close')); return; }
+    var tab = e.target.closest('[data-file]');
+    if (tab) { state.activeFile = tab.getAttribute('data-file'); renderTabs(); renderEditor(); }
+  });
+
+  langList.addEventListener('click', function(e){
+    var item = e.target.closest('[data-lang]');
+    if (!item || !state.activeFile) return;
+    state.files[state.activeFile].language = item.getAttribute('data-lang');
+    closeLangModal();
+    renderEditor();
+  });
+
+  codeInput.addEventListener('input', function(){
+    if (!state.activeFile) return;
+    state.files[state.activeFile].content = codeInput.value;
+    refreshHighlight();
+    updateCursor();
+  });
+  codeInput.addEventListener('scroll', syncScroll);
+  codeInput.addEventListener('click', updateCursor);
+  codeInput.addEventListener('keyup', updateCursor);
+
+  codeInput.addEventListener('keydown', function(e){
+    var pairs = { '(': ')', '[': ']', '{': '}', '"': '"', "'": "'" };
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      insertAtCursor('    ');
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      var pos = codeInput.selectionStart;
+      var before = codeInput.value.slice(0, pos);
+      var lineStart = before.lastIndexOf('\n') + 1;
+      var currentLine = before.slice(lineStart);
+      var indentMatch = currentLine.match(/^[ \t]*/);
+      var indent = indentMatch ? indentMatch[0] : '';
+      if (/[{(\[]\s*$/.test(currentLine)) indent += '    ';
+      insertAtCursor('\n' + indent);
+    } else if (pairs[e.key]) {
+      var s = codeInput.selectionStart, en = codeInput.selectionEnd;
+      if (s === en) {
+        e.preventDefault();
+        insertAtCursor(e.key + pairs[e.key], 1);
+      }
+    } else {
+      var closers = ')]}"\'';
+      if (closers.indexOf(e.key) !== -1) {
+        var p = codeInput.selectionStart;
+        if (codeInput.value[p] === e.key) {
+          e.preventDefault();
+          codeInput.selectionStart = codeInput.selectionEnd = p + 1;
+        }
+      }
+    }
+  });
+
+  /* ============================================================
+     INICIALIZAÇÃO
+  ============================================================ */
+  renderSidebar();
+  renderTabs();
+  renderEditor();
+})();
+</script>
+</body>
+</html>
