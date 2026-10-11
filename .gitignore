@@ -11,3 +11,4 @@ local.properties
 /web/.git/
 /web/node_modules/
 /web/dist/
+/.TEMP

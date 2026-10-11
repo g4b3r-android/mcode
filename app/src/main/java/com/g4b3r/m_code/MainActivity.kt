@@ -2,6 +2,7 @@ package com.g4b3r.m_code
 
 import android.annotation.SuppressLint
 import android.content.ComponentName
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
@@ -19,6 +20,8 @@ import android.view.WindowInsetsController
 import android.widget.Toast
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebChromeClient
 import android.webkit.ValueCallback
 import androidx.activity.ComponentActivity
@@ -31,6 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 import androidx.documentfile.provider.DocumentFile
@@ -46,6 +50,16 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 class MainActivity : ComponentActivity() {
+    internal companion object {
+        const val EDITOR_URL = "file:///android_asset/web/index.html"
+
+        fun isTrustedEditorUrl(url: String?): Boolean =
+            url?.substringBefore('#') == EDITOR_URL
+
+        fun isAllowedEditorNavigation(url: String, isMainFrame: Boolean): Boolean =
+            if (isMainFrame) isTrustedEditorUrl(url)
+            else url == "about:blank" || url == "about:srcdoc"
+    }
     private val projectPrefs by lazy { getSharedPreferences("project_state", Context.MODE_PRIVATE) }
     private val lastProjectUriKey = "last_project_uri"
     private lateinit var myWebView: WebView
@@ -71,7 +85,7 @@ class MainActivity : ComponentActivity() {
     private data class ProjectIndex(val root: Uri, val files: Map<String, Uri>)
     @Volatile private var projectIndex: ProjectIndex? = null
     private val ignoredProjectDirectories = setOf("node_modules", ".git", ".gradle", "build", "dist")
-    private var commandService: IDebianCommandService? = null
+    @Volatile private var commandService: IDebianCommandService? = null
     private var terminalSession: IDebianTerminalSession? = null
     private val terminalLock = Any()
     private var pendingTerminalCommand: PendingTerminalCommand? = null
@@ -174,7 +188,7 @@ class MainActivity : ComponentActivity() {
         myWebView.addJavascriptInterface(webAppInterface, "Android")
 
         startEditor(myWebView)
-        myWebView.loadUrl("file:///android_asset/web/index.html")
+        myWebView.loadUrl(EDITOR_URL)
         hideSystemUI()
     }
 
@@ -226,22 +240,26 @@ class MainActivity : ComponentActivity() {
     }
 
     fun saveProjectFile(relativePath: String, content: String, mimeType: String = "application/octet-stream"): Boolean {
-        val root = currentProjectUri?.let { DocumentFile.fromTreeUri(this, it) } ?: return false
-        val parts = relativePath.replace('\\', '/').split('/').filter { it.isNotBlank() && it != "." && it != ".." }
-        if (parts.isEmpty()) return false
-        var parent = root
-        parts.dropLast(1).forEach { name ->
-            parent = parent.findFile(name)?.takeIf { it.isDirectory }
-                ?: parent.createDirectory(name) ?: return false
+        val parts = ProjectPathValidator.components(relativePath) ?: return false
+        return try {
+            val root = currentProjectUri?.let { DocumentFile.fromTreeUri(this, it) } ?: return false
+            var parent = root
+            parts.dropLast(1).forEach { name ->
+                parent = parent.findFile(name)?.takeIf { it.isDirectory }
+                    ?: parent.createDirectory(name) ?: return false
+            }
+            val fileName = parts.last()
+            val existing = parent.listFiles().firstOrNull { it.name == fileName && !it.isDirectory }
+            val target = existing ?: parent.createFile(mimeType.ifBlank { "application/octet-stream" }, fileName) ?: return false
+            contentResolver.openOutputStream(target.uri, "wt")?.bufferedWriter().use { writer ->
+                writer ?: return false
+                writer.write(content)
+            }
+            true
+        } catch (error: Exception) {
+            Log.w("MainActivity", "Não foi possível salvar arquivo do projeto", error)
+            false
         }
-        val fileName = parts.last()
-        val existing = parent.listFiles().firstOrNull { it.name == fileName && !it.isDirectory }
-        val target = existing ?: parent.createFile(mimeType.ifBlank { "application/octet-stream" }, fileName) ?: return false
-        contentResolver.openOutputStream(target.uri, "wt")?.bufferedWriter().use { writer ->
-            writer ?: return false
-            writer.write(content)
-        }
-        return true
     }
 
 
@@ -260,6 +278,29 @@ class MainActivity : ComponentActivity() {
     }
 
     fun isTerminalServiceConnected(): Boolean = commandService != null
+
+    // Results belong to this Activity's trusted editor; destruction cancels delivery.
+    fun executeLunusDroidCommandAsync(requestId: String, command: String, workingDirectory: String): Boolean {
+        if (isFinishing || isDestroyed || !::myWebView.isInitialized) return false
+        return myWebView.post {
+            if (isFinishing || isDestroyed) return@post
+            lifecycleScope.launch {
+                val result = runInterruptible(Dispatchers.IO) {
+                    if (command.isBlank()) {
+                        "{\"success\":true,\"exitCode\":0,\"output\":\"\",\"error\":\"\"}"
+                    } else {
+                        executeLunusDroidCommand(command, workingDirectory)
+                    }
+                }
+                if (isFinishing || isDestroyed || !isTrustedEditorUrl(myWebView.url)) return@launch
+                val detail = JSONObject(result).put("requestId", requestId).toString()
+                myWebView.evaluateJavascript(
+                    "window.dispatchEvent(new CustomEvent('android:terminal-result', {detail: $detail}));",
+                    null
+                )
+            }
+        }
+    }
 
     fun savePluginZip(base64: String, fileName: String) {
         val bytes = Base64.decode(base64, Base64.DEFAULT)
@@ -471,12 +512,45 @@ class MainActivity : ComponentActivity() {
     }
 
 
+    private fun openExternalEditorLink(uri: Uri) {
+        if (uri.scheme !in setOf("https", "http") || uri.host.isNullOrBlank()) return
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
+        } catch (error: ActivityNotFoundException) {
+            Toast.makeText(this, "Nenhum aplicativo disponível para abrir o link.", Toast.LENGTH_SHORT).show()
+        } catch (error: SecurityException) {
+            Log.w("MainActivity", "Não foi possível abrir o link externo", error)
+        }
+    }
+
    private fun  startEditor(myWebView: WebView){
 // Configuração do WebView
 
        myWebView.webViewClient = object : WebViewClient() {
+           override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest): Boolean {
+               val url = request.url.toString()
+               // Keep the sandboxed srcdoc preview and its blank reset working.
+               if (isAllowedEditorNavigation(url, request.isForMainFrame)) return false
+               if (request.isForMainFrame && request.hasGesture() && request.method == "GET") {
+                   openExternalEditorLink(request.url)
+               }
+               return true
+           }
+
+           override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest): WebResourceResponse? {
+               // POST navigations do not go through shouldOverrideUrlLoading.
+               val destination = request.requestHeaders.entries
+                   .firstOrNull { it.key.equals("Sec-Fetch-Dest", ignoreCase = true) }?.value
+               val isDocument = request.isForMainFrame || destination in setOf("iframe", "frame", "document")
+               if (isDocument && !isAllowedEditorNavigation(request.url.toString(), request.isForMainFrame)) {
+                   return WebResourceResponse("text/plain", "UTF-8", 403, "Forbidden", emptyMap(), "".byteInputStream())
+               }
+               return super.shouldInterceptRequest(view, request)
+           }
+
            override fun onPageFinished(view: WebView?, url: String?) {
                super.onPageFinished(view, url)
+               if (!isTrustedEditorUrl(url) || !isTrustedEditorUrl(view?.url)) return
 
                // Inform the Web side that Android is ready
                myWebView.evaluateJavascript("window.dispatchEvent(new CustomEvent('android:ready'));", null)

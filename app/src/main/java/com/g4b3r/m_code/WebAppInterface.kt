@@ -5,6 +5,7 @@ import android.util.Log
 import android.webkit.JavascriptInterface
 import android.widget.Toast
 import org.json.JSONObject
+import java.util.UUID
 
 class WebAppInterface(
     private val mContext: Context,
@@ -66,6 +67,21 @@ class WebAppInterface(
         val host = activity ?: return "{\"success\":false,\"exitCode\":-1,\"output\":\"\",\"error\":\"App não inicializado.\"}"
         if (command.isBlank()) return "{\"success\":true,\"exitCode\":0,\"output\":\"\",\"error\":\"\"}"
         return host.executeLunusDroidCommand(command, workingDirectory.ifBlank { "/sdcard" })
+    }
+
+    /** Returns a JSON acknowledgement immediately; listen for android:terminal-result before calling.
+     * The event detail contains requestId, success, exitCode, output and error.
+     * accepted=false means no command was scheduled and no result event will follow.
+     */
+    @JavascriptInterface
+    fun runTerminalCommandAsync(command: String, workingDirectory: String = "/sdcard"): String {
+        val requestId = UUID.randomUUID().toString()
+        val accepted = activity?.executeLunusDroidCommandAsync(
+            requestId, command, workingDirectory.ifBlank { "/sdcard" }
+        ) == true
+        return JSONObject().put("requestId", requestId).put("accepted", accepted)
+            .put("error", if (accepted) "" else "Editor não disponível para executar o comando.")
+            .toString()
     }
 
     @JavascriptInterface

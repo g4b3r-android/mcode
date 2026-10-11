@@ -839,6 +839,18 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 16px 24px; border-top: 1px solid var(--border-color); background: var(--bg-sidebar); flex: none; }
 .settings-footer > span { color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .settings-reset { border: 1px solid var(--border-color); background: var(--bg-app); color: var(--text); border-radius: 8px; padding: 10px 12px; font: 12px var(--font-ui); white-space: nowrap; }
+.plugin-actions { display: flex; flex-wrap: wrap; gap: 8px; padding: 6px 0 14px; }
+.plugin-actions button { flex: 1 1 120px; }
+.plugin-list { list-style: none; margin: 0; padding: 0; }
+.plugin-item { display: flex; align-items: center; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--border-color); }
+.plugin-icon { display: grid; place-items: center; width: 36px; height: 36px; flex: none; border-radius: 10px; background: var(--accent-soft); font-size: 18px; }
+.plugin-details { display: flex; flex: 1; flex-direction: column; gap: 4px; min-width: 0; }
+.plugin-details strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.plugin-details small { color: var(--text-muted); font: 11px var(--font-code); }
+.plugin-remove, .plugin-revoke { border: 1px solid var(--border-color); background: var(--bg-sidebar); color: var(--text); border-radius: 8px; padding: 9px 11px; font: 12px var(--font-ui); }
+.plugin-revoke-item { padding: 12px 0; border-bottom: 1px solid var(--border-color); }
+.plugin-revoke { color: var(--text-muted); }
+.plugin-warning { margin: 16px 0 4px; padding: 12px; border: 1px solid var(--border-color); border-radius: 10px; background: var(--bg-sidebar); color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 @media (max-width: 480px) {
   .settings-dialog { width: 100%; max-width: 100%; max-height: 92vh; max-height: 92dvh; margin: auto 0 0; border-radius: 18px 18px 0 0; }
   .settings-header { padding: 20px 18px 16px; }

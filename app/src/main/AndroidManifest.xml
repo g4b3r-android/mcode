@@ -3,8 +3,10 @@
     xmlns:tools="http://schemas.android.com/tools">
 <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="com.g4b3r.lunusdroid.permission.EXECUTE_DEBIAN_COMMANDS" />
+    <!-- Local-only app state: plugins, approvals and SAF references must not be restored.
+         Explicit XML exclusions also cover device transfers that ignore allowBackup. -->
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"

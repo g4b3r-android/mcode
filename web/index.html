@@ -27,6 +27,9 @@
           <div class="breadcrumb" id="breadcrumb">Nenhum arquivo aberto</div>
           <div class="top-actions">
             <div id="customTopActions" class="custom-top-actions"></div>
+            <button id="btnPlugins" class="icon-btn" title="Plugins" aria-label="Plugins" aria-haspopup="dialog">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H5a1 1 0 0 0-1 1v3h2a2 2 0 1 1 0 4H4v7a1 1 0 0 0 1 1h5v-2a2 2 0 1 1 4 0v2h5a1 1 0 0 0 1-1v-5h-2a2 2 0 1 1 0-4h2V5a1 1 0 0 0-1-1h-3v2a2 2 0 1 1-4 0V4h-4z"/></svg>
+            </button>
             <button id="btnSettings" class="icon-btn" title="Configurações" aria-label="Configurações" aria-haspopup="dialog">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="var(--bg-titlebar)"/><circle cx="15" cy="17" r="3" fill="var(--bg-titlebar)"/></svg>
             </button>
@@ -121,14 +124,6 @@
         <p class="modal-hint">Novas linguagens também podem ser registradas em tempo de execução com <code>CodeEditorAPI.addLanguage()</code>.</p>
       </div>
     </div>
-    <div id="pluginModal" class="modal hidden">
-      <div class="modal-card">
-        <div class="modal-header"><span>Plugins instalados</span><button id="btnClosePluginModal" class="icon-btn small" aria-label="Fechar plugins">×</button></div>
-        <ul id="pluginList" class="lang-list"></ul>
-        <p class="modal-hint">Plugins ativos podem adicionar linguagens, comandos e ações ao editor.</p>
-      </div>
-    </div>
-
     <dialog id="settingsDialog" class="settings-dialog" aria-labelledby="settingsTitle" aria-describedby="settingsDescription">
       <header class="settings-header">
         <div><span class="settings-eyebrow">SEU ESPAÇO DE TRABALHO</span><h1 id="settingsTitle">Configurações</h1>
@@ -163,6 +158,27 @@
         </section>
       </div>
       <footer class="settings-footer"><span id="settingsSaveStatus" role="status">Preferências salvas neste dispositivo</span><button id="btnResetSettings" class="settings-reset" type="button">Restaurar padrão</button></footer>
+    </dialog>
+
+    <dialog id="pluginsDialog" class="settings-dialog" aria-labelledby="pluginsTitle" aria-describedby="pluginsDescription">
+      <header class="settings-header">
+        <div><span class="settings-eyebrow">PERSONALIZE SEU EDITOR</span><h1 id="pluginsTitle">Plugins</h1>
+          <p id="pluginsDescription">Instale e gerencie extensões do editor.</p></div>
+        <button id="btnClosePlugins" class="icon-btn" aria-label="Fechar plugins" autofocus>×</button>
+      </header>
+      <div class="settings-content">
+        <section class="settings-section" aria-labelledby="installedPluginsTitle">
+          <h2 id="installedPluginsTitle">Instalados</h2>
+          <div class="plugin-actions">
+            <button id="btnImportPlugins" class="settings-reset" type="button">Importar ZIP</button>
+            <button id="btnAddPluginScript" class="settings-reset" type="button">Adicionar script</button>
+            <button id="btnExportPlugins" class="settings-reset" type="button">Exportar ZIP</button>
+          </div>
+          <ul id="pluginList" class="plugin-list"></ul>
+          <p class="plugin-warning">Plugins executam JavaScript com acesso ao WebView, aos arquivos e ao terminal. Instale apenas scripts de fontes confiáveis.</p>
+        </section>
+      </div>
+      <footer class="settings-footer"><span id="pluginsStatus" role="status">Nenhum plugin instalado.</span></footer>
     </dialog>
 
     <script type="module" src="/src/main.js"></script>

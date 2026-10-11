@@ -5,6 +5,7 @@ import { LANGUAGES } from "./data/languages.js";
 import { tokenize } from "./utils/tokenizer.js";
 import { getLanguageByExtension } from "./utils/utils.js";
 import { buildRuntimeCommand, parseRunResult } from "./utils/runtime.js";
+import { readPluginZip } from "./plugins/zip-reader.js";
 import {
   COMMON_SNIPPETS,
   getCompletionContext,
@@ -86,6 +87,7 @@ const plugins = new Map();
 const shortcuts = new Map();
 const diagnosticsProviders = new Map();
 const pluginStorageKey = "mcode.plugins.sources";
+const pluginApprovalKey = "mcode.plugins.approved-sources.v1";
 let pendingPluginSource = null;
 
 const sidebar = document.getElementById("sidebar");
@@ -101,8 +103,9 @@ const cursorPos = document.getElementById("cursorPos");
 const langPill = document.getElementById("langPill");
 const langModal = document.getElementById("langModal");
 const langList = document.getElementById("langList");
-const pluginModal = document.getElementById("pluginModal");
+const pluginsDialog = document.getElementById("pluginsDialog");
 const pluginList = document.getElementById("pluginList");
+const pluginsStatus = document.getElementById("pluginsStatus");
 const outputPanel = document.getElementById("outputPanel");
 const outputContent = document.getElementById("outputContent");
 const autocomplete = document.getElementById("autocomplete");
@@ -726,27 +729,160 @@ function addPluginFromPrompt() {
   const source = window.prompt("Cole um script ou objeto de plugin JavaScript (ex.: CodeEditorAPI.addPlugin({...})):");
   if (!source?.trim()) return;
   try {
-    installPluginSource(source);
-    window.Android?.showToast?.("Plugin adicionado");
+    if (installPluginSource(source)) {
+      renderPluginList();
+      pluginsStatus.textContent = "Plugin adicionado.";
+      window.Android?.showToast?.("Plugin adicionado");
+    }
   } catch (error) {
+    pluginsStatus.textContent = `Erro ao adicionar plugin: ${String(error)}`;
     window.Android?.showToast?.(`Erro no plugin: ${String(error)}`);
   }
 }
 
-function openPluginList() {
+function renderPluginList() {
   const entries = CodeEditorAPI.getPlugins();
-  pluginList.innerHTML = entries.length
-    ? entries.map(({ id, name }) => `<li class="lang-item active"><span class="file-icon" style="background:#6a9955">🧩</span><span>${escapeHtml(name)}</span><small class="text-muted">${escapeHtml(id)}</small></li>`).join("")
-    : '<li class="file-empty">Nenhum plugin instalado.</li>';
-  pluginModal.classList.remove("hidden");
+  pluginList.replaceChildren();
+  if (!entries.length) {
+    const empty = document.createElement("li");
+    empty.className = "file-empty";
+    empty.textContent = "Nenhum plugin instalado.";
+    pluginList.append(empty);
+  } else {
+    for (const { id, name } of entries) {
+      const item = document.createElement("li");
+      item.className = "plugin-item";
+      const icon = document.createElement("span");
+      icon.className = "plugin-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.textContent = "🧩";
+      const details = document.createElement("span");
+      details.className = "plugin-details";
+      const label = document.createElement("strong");
+      label.textContent = name;
+      const identifier = document.createElement("small");
+      identifier.textContent = id;
+      details.append(label, identifier);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "plugin-remove";
+      remove.dataset.removePlugin = id;
+      remove.textContent = "Remover";
+      remove.setAttribute("aria-label", `Remover plugin ${name}`);
+      item.append(icon, details, remove);
+      pluginList.append(item);
+    }
+  }
+  const approvedSources = readApprovedPluginSources();
+  if (approvedSources.length) {
+    const item = document.createElement("li");
+    item.className = "plugin-revoke-item";
+    const revoke = document.createElement("button");
+    revoke.type = "button";
+    revoke.className = "plugin-revoke";
+    revoke.textContent = "Revogar aprovações dos plugins importados";
+    revoke.addEventListener("click", revokePluginApprovals);
+    item.append(revoke);
+    pluginList.prepend(item);
+  }
+  pluginsStatus.textContent = entries.length
+    ? `${entries.length} plugin(s) instalado(s).`
+    : "Nenhum plugin instalado.";
 }
 
-function installPluginSource(source, { persist = true } = {}) {
+function openPluginList() {
+  renderPluginList();
+  if (!pluginsDialog.open) pluginsDialog.showModal();
+}
+
+function revokePluginApprovals() {
+  if (!readApprovedPluginSources().length) return;
+  if (!window.confirm("Revogar todas as aprovações e desativar os plugins importados? Os scripts armazenados pedirão nova aprovação ao reiniciar. Ações já executadas não serão desfeitas.")) return;
+  try {
+    localStorage.removeItem(pluginApprovalKey);
+  } catch (error) {
+    pluginsStatus.textContent = `Não foi possível revogar as aprovações: ${String(error)}`;
+    window.Android?.showToast?.(`Não foi possível revogar as aprovações: ${String(error)}`);
+    return;
+  }
+  const cleanupErrors = [];
+  for (const plugin of [...plugins.values()]) {
+    if (!plugin.source) continue;
+    try { removePlugin(plugin.id); }
+    catch (error) {
+      emitEditorEvent("plugin-error", { id: plugin.id, error: String(error) });
+      cleanupErrors.push(`${plugin.name}: ${String(error)}`);
+    } finally {
+      plugins.delete(plugin.id);
+    }
+  }
+  renderPluginList();
+  pluginsStatus.textContent = cleanupErrors.length
+    ? `Aprovações revogadas, mas houve falha ao desativar: ${cleanupErrors.join("; ")}`
+    : "Aprovações revogadas. Os plugins importados solicitarão aprovação novamente.";
+}
+
+function uninstallPlugin(id) {
+  const plugin = plugins.get(id);
+  if (!plugin) return;
+  if (!window.confirm(`Remover o plugin "${plugin.name}"?`)) return;
+  if (plugin.source) {
+    try {
+      const saved = JSON.parse(localStorage.getItem(pluginStorageKey) || "[]");
+      const remainingSources = Array.isArray(saved)
+        ? saved.filter((source) => source !== plugin.source)
+        : [];
+      const remainingApprovals = readApprovedPluginSources().filter((source) => source !== plugin.source);
+      localStorage.setItem(pluginStorageKey, JSON.stringify(remainingSources));
+      if (remainingApprovals.length) {
+        localStorage.setItem(pluginApprovalKey, JSON.stringify(remainingApprovals));
+      } else {
+        localStorage.removeItem(pluginApprovalKey);
+      }
+    } catch (error) {
+      pluginsStatus.textContent = `Não foi possível salvar a remoção do plugin: ${String(error)}`;
+      window.Android?.showToast?.(`Não foi possível salvar a remoção do plugin: ${String(error)}`);
+      return;
+    }
+  }
+  try {
+    removePlugin(id);
+    renderPluginList();
+    pluginsStatus.textContent = `Plugin "${plugin.name}" removido.`;
+  } catch (error) {
+    pluginsStatus.textContent = `Erro ao remover ${plugin.name}: ${String(error)}`;
+    window.Android?.showToast?.(`Erro ao remover plugin: ${String(error)}`);
+  }
+}
+
+function readApprovedPluginSources() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(pluginApprovalKey) || "[]");
+    return Array.isArray(saved) ? saved.filter((source) => typeof source === "string") : [];
+  } catch { return []; }
+}
+
+function compilePluginSource(source) {
+  if (typeof source !== "string" || !source.trim()) throw new TypeError("Script de plugin inválido.");
+  try { return Function("CodeEditorAPI", `return (${source});`); }
+  catch { return Function("CodeEditorAPI", source); }
+}
+
+function installPluginSource(source, { persist = true, fileName = "Script importado" } = {}) {
+  if (typeof source !== "string" || !source.trim()) throw new TypeError("Script de plugin inválido.");
+  const approved = readApprovedPluginSources().includes(source);
+  if (!approved) {
+    // These are unverified text hints, never evaluated to discover metadata.
+    const name = source.match(/\bname\s*:\s*["']([^"']+)["']/)?.[1]
+      || source.match(/\bid\s*:\s*["']([^"']+)["']/)?.[1] || fileName;
+    const commands = source.match(/\bstartupCommands\s*:\s*\[[\s\S]*?\]/g);
+    const message = `Instalar e executar o plugin "${name}"?\nArquivo: ${fileName}\n\nEste plugin executa JavaScript com os privilégios do editor, incluindo acesso à bridge Android, arquivos e terminal. Não há isolamento (sandbox).\n\nComandos de inicialização — trechos declarados, não verificados:\n${commands?.join("\n") || "Não identificados no texto."}\n\nEssas informações podem estar incompletas. O script pode executar outros comandos e ações. Aprove somente se confiar na origem.\n\nA aprovação vale para este conteúdo exato e permite restauração automática. Alterações exigem nova aprovação. Para revogar, use a Lista de plugins.`;
+    if (!window.confirm(message)) return false;
+  }
   pendingPluginSource = source;
   try {
-    let result;
-    try { result = Function("CodeEditorAPI", `return (${source});`)(CodeEditorAPI); }
-    catch { result = Function("CodeEditorAPI", source)(CodeEditorAPI); }
+    const execute = compilePluginSource(source);
+    const result = execute(CodeEditorAPI);
     if (result && typeof result === "object" && result.id && typeof result.activate === "function") CodeEditorAPI.addPlugin(result);
     if (persist) {
       const saved = JSON.parse(localStorage.getItem(pluginStorageKey) || "[]");
@@ -756,6 +892,10 @@ function installPluginSource(source, { persist = true } = {}) {
         window.Android.savePluginFile(`${pluginId}.js`, source);
       }
     }
+    if (!approved) {
+      localStorage.setItem(pluginApprovalKey, JSON.stringify([...new Set([...readApprovedPluginSources(), source])]));
+    }
+    return true;
   } finally {
     pendingPluginSource = null;
   }
@@ -773,32 +913,21 @@ function restoreStoredPlugins() {
   });
 }
 
-async function importPluginZip(file) {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const view = new DataView(bytes.buffer);
-  const decoder = new TextDecoder();
-  const files = [];
-  let offset = 0;
-  while (offset + 30 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
-    const method = view.getUint16(offset + 8, true);
-    const compressedSize = view.getUint32(offset + 18, true);
-    const nameSize = view.getUint16(offset + 26, true);
-    const extraSize = view.getUint16(offset + 28, true);
-    const name = decoder.decode(bytes.slice(offset + 30, offset + 30 + nameSize));
-    const start = offset + 30 + nameSize + extraSize;
-    const compressed = bytes.slice(start, start + compressedSize);
-    let data = compressed;
-    if (method === 8) {
-      if (typeof DecompressionStream !== "function") throw new Error("Este WebView não suporta ZIP compactado.");
-      data = new Uint8Array(await new Response(new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"))).arrayBuffer());
-    } else if (method !== 0) throw new Error(`Método ZIP não suportado: ${method}`);
-    files.push({ name, data });
-    offset = start + compressedSize;
-  }
-  const scripts = files.filter(({ name }) => name.toLowerCase().endsWith(".js"));
+async function importPluginZip(file, limits) {
+  const files = await readPluginZip(file, limits);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const scripts = files.filter(({ name }) => name.toLowerCase().endsWith(".js"))
+    .map(({ name, data }) => {
+      const source = decoder.decode(data);
+      compilePluginSource(source); // Validate all scripts without executing any of them.
+      return { name, source };
+    });
   if (!scripts.length) throw new Error("O ZIP não contém arquivos .js de plugin.");
-  for (const entry of scripts) installPluginSource(decoder.decode(entry.data));
-  window.Android?.showToast?.(`${scripts.length} plugin(s) adicionado(s)`);
+  let installed = 0;
+  for (const entry of scripts) {
+    if (installPluginSource(entry.source, { fileName: entry.name })) installed++;
+  }
+  window.Android?.showToast?.(`${installed} plugin(s) adicionado(s); ${scripts.length - installed} cancelado(s)`);
 }
 
 function choosePluginZip() { pluginZipInput.click(); }
@@ -852,7 +981,13 @@ async function exportPluginsZip() {
     const crc = crc32(data);
     const header = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0, ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), 0, 0, ...name]);
     local.push(header, data);
-    const entry = new Uint8Array([0x50, 0x4b, 0x01, 0x02, 20, 0, 20, 0, 0, 0, 0, 0, 0, 0, ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length), 0, 0, 0, 0, 0, 0, 0, 0, ...u32(offset), ...name]);
+    const entry = new Uint8Array([
+      ...u32(0x02014b50), ...u16(20), ...u16(20), // Signature and versions.
+      ...u16(0), ...u16(0), ...u16(0), ...u16(0), // Flags, method, time and date.
+      ...u32(crc), ...u32(data.length), ...u32(data.length), ...u16(name.length),
+      ...u16(0), ...u16(0), ...u16(0), ...u16(0), ...u32(0), // Extra, comment, disk and attributes.
+      ...u32(offset), ...name,
+    ]);
     central.push(entry);
     offset += header.length + data.length;
   }
@@ -1517,11 +1652,36 @@ pluginZipInput.addEventListener("change", async () => {
   const files = [...(pluginZipInput.files || [])];
   pluginZipInput.value = "";
   if (!files.length) return;
-  try { for (const file of files) await importPluginZip(file); }
-  catch (error) { window.Android?.showToast?.(`Erro ao importar plugin: ${String(error)}`); }
+  try {
+    for (const file of files) await importPluginZip(file);
+    renderPluginList();
+  } catch (error) {
+    pluginsStatus.textContent = `Erro ao importar plugin: ${String(error)}`;
+    window.Android?.showToast?.(`Erro ao importar plugin: ${String(error)}`);
+  }
 });
-document.getElementById("btnClosePluginModal").addEventListener("click", () => pluginModal.classList.add("hidden"));
-pluginModal.addEventListener("click", (event) => { if (event.target === pluginModal) pluginModal.classList.add("hidden"); });
+document.getElementById("btnPlugins").addEventListener("click", openPluginList);
+document.getElementById("btnClosePlugins").addEventListener("click", () => pluginsDialog.close());
+pluginsDialog.addEventListener("click", (event) => {
+  if (event.target !== pluginsDialog) return;
+  const rect = pluginsDialog.getBoundingClientRect();
+  if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) pluginsDialog.close();
+});
+document.getElementById("btnImportPlugins").addEventListener("click", choosePluginZip);
+document.getElementById("btnAddPluginScript").addEventListener("click", addPluginFromPrompt);
+document.getElementById("btnExportPlugins").addEventListener("click", async () => {
+  try {
+    await exportPluginsZip();
+    pluginsStatus.textContent = "Arquivo plugins.zip exportado.";
+  } catch (error) {
+    pluginsStatus.textContent = `Erro ao exportar plugins: ${String(error)}`;
+    window.Android?.showToast?.(`Erro ao exportar plugins: ${String(error)}`);
+  }
+});
+pluginList.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-remove-plugin]");
+  if (button) uninstallPlugin(button.dataset.removePlugin);
+});
 document.getElementById("btnCloseTerminal").addEventListener("click", () => terminalPanel.classList.add("hidden"));
 terminalForm.addEventListener("submit", (event) => {
   event.preventDefault();

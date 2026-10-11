@@ -146,18 +146,23 @@ retornada por `activate`) e remover o plugin. Eventos disponíveis:
 `plugin-removed`. Plugins executam código com as permissões do WebView; só
 instale scripts confiáveis.
 
-Use **Arquivos → Adicionar plugin** para selecionar um ou vários arquivos
-`.zip`. O importador extrai todos os arquivos `.js` dos pacotes e executa cada
-plugin com acesso ao `CodeEditorAPI`. Cada script também é salvo como arquivo
-na área interna de plugins do aplicativo.
+Abra **Plugins** pelo botão de peça de quebra-cabeça na barra superior para
+consultar, adicionar, importar, exportar ou remover plugins. **Importar ZIP**
+seleciona um ou vários arquivos `.zip`; o importador extrai todos os arquivos
+`.js` dos pacotes e executa cada plugin com acesso ao `CodeEditorAPI`. Cada
+script também é salvo como arquivo na área interna de plugins do aplicativo.
+**Adicionar script** permite colar código JavaScript diretamente.
 O código-fonte importado é salvo no armazenamento local do WebView e os
 plugins são restaurados automaticamente quando o app é aberto novamente.
+Ao remover um plugin importado, seu código deixa de ser restaurado e a aprovação
+do conteúdo é revogada. A opção para revogar aprovações desativa os plugins
+importados e solicita nova aprovação na próxima abertura.
 
 Um exemplo pronto está em
 `plugins/examples/javascript-language-plugin.zip`. Ele atualiza a linguagem
 JavaScript, registra snippets e adiciona o botão `Node` à barra superior.
 
-Em **Arquivos → Exportar plugins (.zip)**, o editor baixa `plugins.zip` com
+Em **Plugins → Exportar ZIP**, o editor baixa `plugins.zip` com
 `plugins.json` (manifesto, comandos e comandos de inicialização) e um arquivo
 `plugins/<id>.js` com o código-fonte de cada plugin exportado.
 No Android, a ação abre o seletor nativo para escolher a pasta e o nome do

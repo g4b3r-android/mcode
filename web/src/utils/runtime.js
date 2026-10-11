@@ -1,3 +1,7 @@
+export function quoteShellArgument(value) {
+  return `'${String(value).replace(/'/g, "'\"'\"'")}'`;
+}
+
 export function buildRuntimeCommand(
   fileName,
   languageId,
@@ -12,23 +16,24 @@ export function buildRuntimeCommand(
   const filePath = safeName.startsWith("/")
     ? safeName
     : `${safeDir}/${safeName}`;
+  const quotedPath = quoteShellArgument(filePath);
 
   const baseCommand = (() => {
     switch (String(languageId || "").toLowerCase()) {
       case "javascript":
       case "js":
-        return `node "${filePath}"`;
+        return `node ${quotedPath}`;
       case "python":
       case "py":
-        return `python3 "${filePath}"`;
+        return `python3 ${quotedPath}`;
       case "bash":
       case "shell":
       case "sh":
-        return `bash "${filePath}"`;
+        return `bash ${quotedPath}`;
       case "java":
-        return `javac "${filePath}" && java "${filePath.replace(/\.java$/, "")}"`;
+        return `javac ${quotedPath} && java ${quoteShellArgument(filePath.replace(/\.java$/, ""))}`;
       default:
-        return `sh "${filePath}"`;
+        return `sh ${quotedPath}`;
     }
   })();
 

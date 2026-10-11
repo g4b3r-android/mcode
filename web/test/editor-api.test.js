@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { readPluginZip } from '../src/plugins/zip-reader.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -94,6 +95,48 @@ function connectDevTools(webSocketUrl) {
       socket.close();
     }
   };
+}
+
+function storedPluginZip(source) {
+  const files = Array.isArray(source) ? source : [{ name: 'plugins/approval-test.js', source }];
+  const locals = [], centrals = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = Buffer.from(file.name);
+    const data = Buffer.from(file.source);
+    let crc = 0xffffffff;
+    for (const byte of data) {
+      crc ^= byte;
+      for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+    crc = (crc ^ 0xffffffff) >>> 0;
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt32LE(crc, 14);
+    local.writeUInt32LE(data.length, 18);
+    local.writeUInt32LE(data.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt32LE(crc, 16);
+    central.writeUInt32LE(data.length, 20);
+    central.writeUInt32LE(data.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    locals.push(local, name, data);
+    centrals.push(central, name);
+    offset += local.length + name.length + data.length;
+  }
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(centrals.reduce((total, part) => total + part.length, 0), 12);
+  end.writeUInt32LE(offset, 16);
+  return [...Buffer.concat([...locals, ...centrals, end])];
 }
 
 test('bundle usa JavaScript clássico compatível com Android WebView', () => {
@@ -462,6 +505,179 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
     assert.equal(restored.defaults.fontSize, 13.5);
     assert.equal(restored.defaults.lineNumbers, true);
     assert.equal(restored.closed, true);
+  });
+
+  await t.test('plugins têm uma área dedicada acessível pela barra superior', async () => {
+    const panel = await devTools.evaluate(`(() => {
+      document.getElementById('btnPlugins').click();
+      const dialog = document.getElementById('pluginsDialog');
+      const open = dialog.open;
+      const rect = dialog.getBoundingClientRect();
+      const actions = ['btnImportPlugins', 'btnAddPluginScript', 'btnExportPlugins']
+        .map(id => document.getElementById(id).textContent);
+      document.getElementById('btnClosePlugins').click();
+      return { open, title: document.getElementById('pluginsTitle').textContent,
+        actions, fits: rect.left >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+        closed: !dialog.open };
+    })()`);
+    assert.equal(panel.open, true);
+    assert.equal(panel.title, 'Plugins');
+    assert.deepEqual(panel.actions, ['Importar ZIP', 'Adicionar script', 'Exportar ZIP']);
+    assert.equal(panel.fits, true);
+    assert.equal(panel.closed, true);
+  });
+
+  await t.test('plugins exigem aprovação antes de executar, persistir e restaurar', async () => {
+    const source = `window.pluginTopLevelRuns = (window.pluginTopLevelRuns || 0) + 1;
+      CodeEditorAPI.addPlugin({ id: 'approval-test', name: 'Plugin de aprovação',
+        startupCommands: ['echo approval-test'],
+        activate() { window.pluginActivations = (window.pluginActivations || 0) + 1;
+          return () => { window.pluginCleaned = true; }; }
+      });`;
+    const bootstrap = `
+      window.pluginTest = { prompts: [], writes: [], commands: [], toasts: [] };
+      window.confirm = (message) => {
+        pluginTest.prompts.push({ message, executions: window.pluginTopLevelRuns || 0 });
+        return sessionStorage.getItem('approve-test-plugin') === 'yes';
+      };
+      window.Android = {
+        savePluginFile: (...args) => { pluginTest.writes.push(args); return true; },
+        savePluginZip: (base64) => { window.pluginExport = base64; },
+        runTerminalCommand: (command) => {
+          pluginTest.commands.push(command);
+          return JSON.stringify({ success: true, exitCode: 0, output: '' });
+        },
+        showToast: (message) => pluginTest.toasts.push(message)
+      };`;
+    await devTools.evaluate(bootstrap);
+    const importZip = (content, mutate = bytes => bytes) => devTools.evaluate(`(async () => {
+      const before = pluginTest.toasts.length;
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([new Uint8Array(${JSON.stringify(mutate(storedPluginZip(content)))})], 'plugin.zip'));
+      const input = document.getElementById('pluginZipInput');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change'));
+      const deadline = Date.now() + 3000;
+      while (pluginTest.toasts.length === before && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      return { ...pluginTest, runs: window.pluginTopLevelRuns || 0,
+        activations: window.pluginActivations || 0, plugins: CodeEditorAPI.getPlugins(),
+        saved: JSON.parse(localStorage.getItem('mcode.plugins.sources') || '[]'),
+        approvals: JSON.parse(localStorage.getItem('mcode.plugins.approved-sources.v1') || '[]') };
+    })()`);
+    for (const tail of [
+      { name: 'asset.txt', source: 'corrupted asset' },
+      { name: 'invalid.js', source: 'function {' },
+      { name: 'empty.js', source: '   ' },
+    ]) {
+      const rejected = await importZip([{ name: 'first.js', source }, tail], bytes => {
+        if (tail.name === 'asset.txt') {
+          const centralStart = Buffer.from(bytes).readUInt32LE(bytes.length - 6);
+          bytes[centralStart - 1] ^= 1;
+        }
+        return bytes;
+      });
+      assert.equal(rejected.runs, 0);
+      assert.deepEqual(rejected.prompts, []);
+      assert.deepEqual(rejected.writes, []);
+      assert.deepEqual(rejected.saved, []);
+      assert.deepEqual(rejected.approvals, []);
+      assert.deepEqual(rejected.plugins, []);
+      assert.match(rejected.toasts.at(-1), /Erro ao importar plugin/);
+    }
+    const cancelled = await importZip(source);
+    assert.equal(cancelled.runs, 0);
+    assert.equal(cancelled.activations, 0);
+    assert.deepEqual(cancelled.plugins, []);
+    assert.deepEqual(cancelled.saved, []);
+    assert.deepEqual(cancelled.approvals, []);
+    assert.deepEqual(cancelled.writes, []);
+    assert.deepEqual(cancelled.commands, []);
+    assert.match(cancelled.toasts.at(-1), /0 plugin.*1 cancelado/);
+    assert.match(cancelled.prompts[0].message, /Plugin de aprovação/);
+    assert.match(cancelled.prompts[0].message, /echo approval-test/);
+    assert.match(cancelled.prompts[0].message, /Não há isolamento/);
+    assert.equal(cancelled.prompts[0].executions, 0);
+
+    await devTools.evaluate("sessionStorage.setItem('approve-test-plugin', 'yes')");
+    const approved = await importZip(source);
+    assert.equal(approved.runs, 1);
+    assert.equal(approved.activations, 1);
+    assert.deepEqual(approved.commands, ['echo approval-test']);
+    assert.deepEqual(approved.saved, [source]);
+    assert.deepEqual(approved.approvals, [source]);
+    assert.equal(approved.writes.length, 1);
+    const exported = await devTools.evaluate('(async () => { await window.exportPluginsZip(); return window.pluginExport; })()');
+    const exportedFiles = await readPluginZip(new Blob([Buffer.from(exported, 'base64')]));
+    assert.deepEqual(exportedFiles.map(({ name }) => name), ['plugins.json', 'plugins/approval-test.js']);
+    assert.equal(new TextDecoder().decode(exportedFiles[1].data), source);
+
+    await devTools.evaluate("sessionStorage.removeItem('approve-test-plugin')");
+    const changed = await importZip(source + '\n// changed content');
+    assert.equal(changed.runs, 1);
+    assert.equal(changed.prompts.length, 3);
+    assert.deepEqual(changed.saved, [source]);
+    assert.deepEqual(changed.approvals, [source]);
+    assert.equal(changed.writes.length, 1);
+
+    await devTools.command('Page.enable');
+    const { identifier } = await devTools.command('Page.addScriptToEvaluateOnNewDocument', { source: bootstrap });
+    async function reloadPlugins() {
+      await devTools.evaluate('window.pluginTest = null');
+      await devTools.command('Page.reload');
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        try {
+          const state = await devTools.evaluate(`window.pluginTest && window.CodeEditorAPI && ({
+            ...pluginTest, plugins: CodeEditorAPI.getPlugins(), runs: window.pluginTopLevelRuns || 0,
+            approvals: JSON.parse(localStorage.getItem('mcode.plugins.approved-sources.v1') || '[]')
+          })`);
+          if (state) return state;
+        } catch {}
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+      const state = await devTools.evaluate('({ ready: document.readyState, hooks: !!window.pluginTest, api: !!window.CodeEditorAPI })');
+      throw new Error('Plugins não restaurados no prazo esperado: ' + JSON.stringify(state));
+    }
+    try {
+      const restoredPlugins = await reloadPlugins();
+      assert.equal(restoredPlugins.runs, 1);
+      assert.equal(restoredPlugins.prompts.length, 0);
+      assert.deepEqual(restoredPlugins.commands, ['echo approval-test']);
+
+      const revoked = await devTools.evaluate(`(() => {
+        sessionStorage.setItem('approve-test-plugin', 'yes');
+        window.openPluginList();
+        document.querySelector('#pluginList button').click();
+        sessionStorage.removeItem('approve-test-plugin');
+        return { cleaned: window.pluginCleaned, plugins: CodeEditorAPI.getPlugins(),
+          approval: localStorage.getItem('mcode.plugins.approved-sources.v1') };
+      })()`);
+      assert.equal(revoked.cleaned, true);
+      assert.deepEqual(revoked.plugins, []);
+      assert.equal(revoked.approval, null);
+      const legacy = await reloadPlugins();
+      assert.equal(legacy.prompts.length, 1);
+      assert.equal(legacy.runs, 0);
+      assert.deepEqual(legacy.plugins, []);
+      assert.deepEqual(legacy.approvals, []);
+
+      await devTools.evaluate("sessionStorage.setItem('approve-test-plugin', 'yes')");
+      const migrated = await reloadPlugins();
+      assert.equal(migrated.prompts.length, 1);
+      assert.equal(migrated.runs, 1);
+      assert.deepEqual(migrated.approvals, [source]);
+
+      const objectImport = await devTools.evaluate(`(() => {
+        window.prompt = () => "({ id: 'object-plugin', name: 'Objeto', activate() { window.objectPluginActive = true; } })";
+        window.addPluginFromPrompt();
+        return window.objectPluginActive;
+      })()`);
+      assert.equal(objectImport, true);
+    } finally {
+      await devTools.command('Page.removeScriptToEvaluateOnNewDocument', { identifier });
+    }
   });
 
 });
