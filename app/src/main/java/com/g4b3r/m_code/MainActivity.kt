@@ -45,6 +45,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.charset.StandardCharsets
 import java.io.File
+import java.lang.ref.WeakReference
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -52,6 +53,7 @@ import java.util.concurrent.TimeUnit
 class MainActivity : ComponentActivity() {
     internal companion object {
         const val EDITOR_URL = "file:///android_asset/web/index.html"
+        const val TERMINAL_OUTPUT_LIMIT = 256 * 1024 // UTF-16 code units per command.
 
         fun isTrustedEditorUrl(url: String?): Boolean =
             url?.substringBefore('#') == EDITOR_URL
@@ -82,80 +84,134 @@ class MainActivity : ComponentActivity() {
     }
     @Volatile private var currentProjectUri: Uri? = null
     private var projectLoadJob: Job? = null
+    private var projectPickerPending = false
+    private var projectReplacementPending = false
+    private var projectLoadGeneration = 0L
     private data class ProjectIndex(val root: Uri, val files: Map<String, Uri>)
     @Volatile private var projectIndex: ProjectIndex? = null
     private val ignoredProjectDirectories = setOf("node_modules", ".git", ".gradle", "build", "dist")
     @Volatile private var commandService: IDebianCommandService? = null
     private var terminalSession: IDebianTerminalSession? = null
+    internal val interactiveTerminal = InteractiveTerminalSession()
+
+    fun openInteractiveTerminal(id: String, directory: String, rows: Int, cols: Int): Boolean {
+        if (terminalDisposed) return false
+        val service = commandService ?: return false
+        return interactiveTerminal.open(service, id, directory, rows, cols)
+    }
+    @Volatile private var terminalDisposed = false
+    private var terminalGeneration = 0L
     private val terminalLock = Any()
+    private val terminalOutputDecoder = IncrementalUtf8Decoder()
     private var pendingTerminalCommand: PendingTerminalCommand? = null
 
-    private class PendingTerminalCommand(val marker: String, val startMarker: String) {
+    internal class PendingTerminalCommand(val marker: String, val startMarker: String) {
         val output = StringBuilder()
         val completed = CountDownLatch(1)
         var exitCode: Int? = null
         var error: String? = null
-    }
+        var truncated = false
+            private set
+        private var startsMidLine = false
 
-    private val terminalCallback = object : IDebianTerminalCallback.Stub() {
-        override fun onOutput(data: ByteArray?) {
-            if (data == null || data.isEmpty()) return
-            synchronized(terminalLock) {
-                val pending = pendingTerminalCommand ?: return
-                if (pending.exitCode != null) return
-                pending.output.append(String(data, StandardCharsets.UTF_8))
-                val completion = findTerminalCompletion(pending.output, pending.marker) ?: return
-                pending.exitCode = completion.exitCode
-                pending.output.delete(completion.markerStart, pending.output.length)
-                pending.completed.countDown()
+        fun appendOutput(text: String) {
+            var offset = 0
+            while (offset < text.length && exitCode == null) {
+                // Include the longest Int status, CRLF and preceding line boundary.
+                val scanStart = (output.length - marker.length - 16).coerceAtLeast(0)
+                val prefix = if (scanStart > 0 || startsMidLine) "x" else ""
+                val end = minOf(offset + 8192, text.length)
+                output.append(text, offset, end)
+                val completion = findTerminalCompletion(prefix + output.substring(scanStart), marker)
+                if (completion != null) {
+                    exitCode = completion.exitCode
+                    output.delete(scanStart + completion.markerStart - prefix.length, output.length)
+                }
+                if (output.length > TERMINAL_OUTPUT_LIMIT) {
+                    var remove = output.length - TERMINAL_OUTPUT_LIMIT
+                    if (Character.isHighSurrogate(output[remove - 1]) &&
+                        Character.isLowSurrogate(output[remove])) remove++
+                    startsMidLine = output[remove - 1] !in "\n\r\u0085\u2028\u2029"
+                    output.delete(0, remove)
+                    truncated = true
+                }
+                if (completion != null) completed.countDown()
+                offset = end
             }
         }
 
-        override fun onSessionClosed(exitCode: Int) {
-            synchronized(terminalLock) {
-                terminalSession = null
-                pendingTerminalCommand?.let {
-                    it.error = "Sessão do terminal encerrada (exit code $exitCode)."
-                    it.completed.countDown()
+        fun formattedOutput(): String {
+            val content = cleanTerminalOutput(output.toString(), startMarker)
+            return if (truncated) {
+                "[terminal] Saída truncada; apenas o trecho mais recente foi mantido.\n$content"
+            } else content
+        }
+    }
+
+    private fun createTerminalCallback(generation: Long): IDebianTerminalCallback {
+        val activity = WeakReference(this)
+        return object : IDebianTerminalCallback.Stub() {
+            override fun onOutput(data: ByteArray?) {
+                if (data == null || data.isEmpty()) return
+                val owner = activity.get() ?: return
+                synchronized(owner.terminalLock) {
+                    if (owner.terminalDisposed || owner.terminalGeneration != generation) return
+                    val output = owner.terminalOutputDecoder.decode(data)
+                    owner.pendingTerminalCommand?.appendOutput(output)
+                }
+            }
+
+            override fun onSessionClosed(exitCode: Int) {
+                val owner = activity.get() ?: return
+                synchronized(owner.terminalLock) {
+                    if (owner.terminalDisposed || owner.terminalGeneration != generation) return
+                    owner.detachTerminalSession("Sessão do terminal encerrada (exit code $exitCode).")
                 }
             }
         }
     }
     private val projectPickerLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+            projectPickerPending = false
             if (uri == null) {
                 notifyProjectSelectionCancelled()
                 return@registerForActivityResult
             }
-            grantUriPermission(
-                packageName,
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-            contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-            )
-            projectPrefs.edit().putString(lastProjectUriKey, uri.toString()).apply()
-            currentProjectUri = uri
-            loadProjectFiles(uri)
+            try {
+                grantUriPermission(
+                    packageName,
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                loadProjectFiles(uri)
+            } catch (error: Exception) {
+                Log.w("MainActivity", "Não foi possível acessar o projeto selecionado", error)
+                notifyProjectSelectionCancelled()
+            }
         }
 
     private val commandServiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            commandService = IDebianCommandService.Stub.asInterface(service)
-            synchronized(terminalLock) { terminalSession = null }
+            val previous = synchronized(terminalLock) {
+                if (terminalDisposed) return
+                val previous = detachTerminalSession("Conexão com LunusDroid substituída.")
+                commandService = IDebianCommandService.Stub.asInterface(service)
+                previous
+            }
+            closeTerminalSession(previous)
             Log.d("MainActivity", "LunusDroid service connected")
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
-            commandService = null
+            interactiveTerminal.disconnect("Serviço LunusDroid desconectado.")
             synchronized(terminalLock) {
-                terminalSession = null
-                pendingTerminalCommand?.let {
-                    it.error = "Serviço LunusDroid desconectado."
-                    it.completed.countDown()
-                }
+                if (terminalDisposed) return
+                commandService = null
+                detachTerminalSession("Serviço LunusDroid desconectado.")
             }
             Log.w("MainActivity", "LunusDroid service disconnected")
         }
@@ -193,22 +249,22 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // Ir para segundo plano ou recriar a Activity não encerra o shell.
-        // A sessão continua pertencendo ao processo enquanto ele estiver vivo.
-        if (isFinishing) {
-            synchronized(terminalLock) {
-                try { terminalSession?.close() } catch (_: Exception) { }
-                terminalSession = null
-                pendingTerminalCommand?.completed?.countDown()
-                pendingTerminalCommand = null
-            }
+        interactiveTerminal.dispose()
+        // The AIDL contract cannot reattach a new Activity to this callback/session.
+        val session = synchronized(terminalLock) {
+            terminalDisposed = true
+            commandService = null
+            detachTerminalSession("Activity do terminal destruída; sessão encerrada.")
         }
-        super.onDestroy()
+        // Close outside the callback lock to avoid Binder callback deadlocks.
+        closeTerminalSession(session)
         try {
+            // Even bindService() returning false can require unbinding.
             unbindService(commandServiceConnection)
         } catch (_: IllegalArgumentException) {
-            // serviço ainda não estava vinculado
+            // The binding was already released or never registered.
         }
+        super.onDestroy()
     }
 
     private fun bindLunusDroidService() {
@@ -235,7 +291,6 @@ class MainActivity : ComponentActivity() {
             projectPrefs.edit().remove(lastProjectUriKey).apply()
             return
         }
-        currentProjectUri = savedUri
         loadProjectFiles(savedUri)
     }
 
@@ -277,13 +332,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    fun isTerminalServiceConnected(): Boolean = commandService != null
+    fun isTerminalServiceConnected(): Boolean = !terminalDisposed && commandService != null
 
     // Results belong to this Activity's trusted editor; destruction cancels delivery.
     fun executeLunusDroidCommandAsync(requestId: String, command: String, workingDirectory: String): Boolean {
-        if (isFinishing || isDestroyed || !::myWebView.isInitialized) return false
+        if (terminalDisposed || isFinishing || isDestroyed || !::myWebView.isInitialized) return false
         return myWebView.post {
-            if (isFinishing || isDestroyed) return@post
+            if (terminalDisposed || isFinishing || isDestroyed) return@post
             lifecycleScope.launch {
                 val result = runInterruptible(Dispatchers.IO) {
                     if (command.isBlank()) {
@@ -292,7 +347,7 @@ class MainActivity : ComponentActivity() {
                         executeLunusDroidCommand(command, workingDirectory)
                     }
                 }
-                if (isFinishing || isDestroyed || !isTrustedEditorUrl(myWebView.url)) return@launch
+                if (terminalDisposed || isFinishing || isDestroyed || !isTrustedEditorUrl(myWebView.url)) return@launch
                 val detail = JSONObject(result).put("requestId", requestId).toString()
                 myWebView.evaluateJavascript(
                     "window.dispatchEvent(new CustomEvent('android:terminal-result', {detail: $detail}));",
@@ -319,6 +374,23 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) { false }
     }
 
+    // Called under terminalLock. Invalidate callbacks before notifying waiting commands.
+    private fun detachTerminalSession(error: String): IDebianTerminalSession? {
+        terminalGeneration++
+        pendingTerminalCommand?.appendOutput(terminalOutputDecoder.finish())
+        val session = terminalSession
+        terminalSession = null
+        pendingTerminalCommand?.let {
+            if (it.exitCode == null && it.error == null) it.error = error
+            it.completed.countDown()
+        }
+        return session
+    }
+
+    private fun closeTerminalSession(session: IDebianTerminalSession?) {
+        try { session?.close() } catch (_: Exception) { }
+    }
+
     private fun executeInContinuousSession(
         service: IDebianCommandService,
         command: String,
@@ -328,17 +400,21 @@ class MainActivity : ComponentActivity() {
         val startMarker = marker.replace("_DONE_", "_START_")
         val pending = PendingTerminalCommand(marker, startMarker)
         val session = synchronized(terminalLock) {
-            if (terminalSession == null) {
-                terminalSession = service.createTerminalSession(terminalCallback, 24, 80)
+            if (terminalDisposed || commandService !== service) {
+                throw IllegalStateException("Conexão do terminal indisponível.")
             }
-            terminalSession
-        } ?: throw RemoteException("Não foi possível criar a sessão contínua.")
-
-        synchronized(terminalLock) {
             if (pendingTerminalCommand != null) {
                 throw IllegalStateException("Já existe um comando em execução no terminal.")
             }
+            if (terminalSession == null) {
+                terminalOutputDecoder.reset()
+                val callback = createTerminalCallback(++terminalGeneration)
+                terminalSession = service.createTerminalSession(callback, 24, 80)
+            }
+            val session = terminalSession
+                ?: throw RemoteException("Não foi possível criar a sessão contínua.")
             pendingTerminalCommand = pending
+            session
         }
 
         try {
@@ -346,18 +422,24 @@ class MainActivity : ComponentActivity() {
             val commandText = buildTerminalCommand(command, workingDirectory, startMarker, marker)
             session.write((commandText + "\r").toByteArray(StandardCharsets.UTF_8))
             if (!pending.completed.await(10, TimeUnit.MINUTES)) {
-                pending.error = "Tempo limite excedido (10 minutos)."
-                // Não reutilize um shell que ainda pode estar executando o comando.
-                synchronized(terminalLock) {
-                    try { terminalSession?.close() } catch (_: Exception) { }
-                    terminalSession = null
+                val expired = synchronized(terminalLock) {
+                    detachTerminalSession("Tempo limite excedido (10 minutos).")
                 }
+                closeTerminalSession(expired)
             }
+        } catch (error: Exception) {
+            val interrupted = synchronized(terminalLock) {
+                detachTerminalSession(error.message ?: "Execução do terminal interrompida.")
+            }
+            closeTerminalSession(interrupted)
+            throw error
         } finally {
-            synchronized(terminalLock) { pendingTerminalCommand = null }
+            synchronized(terminalLock) {
+                if (pendingTerminalCommand === pending) pendingTerminalCommand = null
+            }
         }
 
-        val output = cleanTerminalOutput(pending.output.toString(), pending.startMarker)
+        val output = pending.formattedOutput()
         val exitCode = pending.exitCode ?: -1
         val error = pending.error ?: if (pending.exitCode == null) {
             "A sessão não retornou o exit code do comando."
@@ -368,7 +450,33 @@ class MainActivity : ComponentActivity() {
 
 
     fun requestOpenProject() {
-        runOnUiThread { projectPickerLauncher.launch(null) }
+        runOnUiThread {
+            if (projectPickerPending || projectReplacementPending) return@runOnUiThread
+            projectPickerPending = true
+            confirmProjectReplacement { approved ->
+                if (approved) {
+                    try {
+                        projectPickerLauncher.launch(null)
+                    } catch (error: Exception) {
+                        projectPickerPending = false
+                        Log.w("MainActivity", "Não foi possível abrir o seletor de projetos", error)
+                        notifyProjectSelectionCancelled()
+                    }
+                } else {
+                    projectPickerPending = false
+                    notifyProjectSelectionCancelled()
+                }
+            }
+        }
+    }
+
+    private fun confirmProjectReplacement(onResult: (Boolean) -> Unit) {
+        if (isFinishing || isDestroyed) return
+        myWebView.evaluateJavascript(
+            "typeof window.confirmProjectReplacement === 'function' && window.confirmProjectReplacement();"
+        ) { result ->
+            if (!isFinishing && !isDestroyed) onResult(result == "true")
+        }
     }
 
     private fun notifyProjectSelectionCancelled() {
@@ -382,7 +490,8 @@ class MainActivity : ComponentActivity() {
 
     private fun loadProjectFiles(rootUri: Uri) {
         projectLoadJob?.cancel()
-        projectIndex = null
+        val generation = ++projectLoadGeneration
+        projectReplacementPending = true
         myWebView.evaluateJavascript(
             "window.dispatchEvent(new CustomEvent('android:project-loading'));", null
         )
@@ -391,6 +500,7 @@ class MainActivity : ComponentActivity() {
                 val (index, payload) = withContext(Dispatchers.IO) {
                     val root = DocumentFile.fromTreeUri(this@MainActivity, rootUri)
                         ?: error("Não foi possível abrir o projeto.")
+                    check(root.isDirectory && root.canRead()) { "O diretório do projeto não está acessível." }
                     val files = linkedMapOf<String, Uri>()
                     collectProjectFiles(root, "", files)
                     val entries = JSONArray()
@@ -403,14 +513,25 @@ class MainActivity : ComponentActivity() {
                         put("files", entries)
                     }
                 }
-                projectIndex = index
-                myWebView.evaluateJavascript(
-                    "window.dispatchEvent(new CustomEvent('android:project-opened', { detail: $payload }));",
-                    null
-                )
+                confirmProjectReplacement { approved ->
+                    if (generation != projectLoadGeneration) return@confirmProjectReplacement
+                    projectReplacementPending = false
+                    if (!approved) {
+                        notifyProjectSelectionCancelled()
+                        return@confirmProjectReplacement
+                    }
+                    currentProjectUri = rootUri
+                    projectIndex = index
+                    projectPrefs.edit().putString(lastProjectUriKey, rootUri.toString()).apply()
+                    myWebView.evaluateJavascript(
+                        "window.dispatchEvent(new CustomEvent('android:project-opened', { detail: $payload }));",
+                        null
+                    )
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
+                projectReplacementPending = false
                 Log.e("MainActivity", "Erro ao abrir projeto", error)
                 Toast.makeText(this@MainActivity, "Não foi possível abrir o projeto.", Toast.LENGTH_LONG).show()
                 notifyProjectSelectionCancelled()

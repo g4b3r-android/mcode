@@ -1,10 +1,11 @@
 import "./styles.css";
+import { createInteractiveTerminal } from "./interactive-terminal.js";
 import { DEFAULT_SETTINGS, initSettings } from "./utils/settings.js";
 let preferences = { ...DEFAULT_SETTINGS };
 import { LANGUAGES } from "./data/languages.js";
 import { tokenize } from "./utils/tokenizer.js";
 import { getLanguageByExtension } from "./utils/utils.js";
-import { buildRuntimeCommand, parseRunResult } from "./utils/runtime.js";
+import { buildRuntimeCommand, parseRunResult, quoteShellArgument } from "./utils/runtime.js";
 import { readPluginZip } from "./plugins/zip-reader.js";
 import {
   COMMON_SNIPPETS,
@@ -120,6 +121,13 @@ const terminalPanel = document.getElementById("terminalPanel");
 const terminalOutput = document.getElementById("terminalOutput");
 const terminalForm = document.getElementById("terminalForm");
 const terminalInput = document.getElementById("terminalInput");
+const terminalTitle = terminalPanel.querySelector(".output-header span");
+terminalTitle.setAttribute("aria-live", "polite");
+const terminalRequestTimeoutMs = 10 * 60 * 1000 + 15000; // Native timeout plus event delivery time.
+let pendingTerminalRequest = null;
+let interactiveTerminal = null;
+const terminalHistoryLimit = 128 * 1024; // UTF-16 code units, independent of native retention.
+const terminalHistoryNotice = "[terminal] Histórico truncado; apenas o trecho mais recente foi mantido.\n";
 const shortcutBar = document.getElementById("shortcutBar");
 const pluginZipInput = document.getElementById("pluginZipInput");
 let terminalDirectory = "/sdcard";
@@ -251,6 +259,7 @@ function renderTabs() {
       const active = name === state.activeFile ? "active" : "";
       return `<div class="tab ${active}" data-file="${escapeAttribute(name)}">
       <span class="tab-name">${escapeHtml(name)}</span>
+      ${state.files[name].dirty ? '<span class="tab-dirty" style="font-size:10px" title="Alterações não salvas" aria-label="Alterações não salvas">●</span>' : ''}
       <button class="tab-close" data-close="${escapeAttribute(name)}">×</button>
     </div>`;
     })
@@ -521,9 +530,16 @@ function openFile(name) {
   closeSidebar();
 }
 
+function confirmUnsavedChanges(name) {
+  return !state.files[name]?.dirty || window.confirm(
+    `"${name}" tem alterações não salvas. Deseja continuar sem salvar?`,
+  );
+}
+
 function closeTab(name) {
   const idx = state.openTabs.indexOf(name);
   if (idx === -1) return;
+  if (!confirmUnsavedChanges(name)) return;
 
   state.openTabs.splice(idx, 1);
 
@@ -537,13 +553,14 @@ function closeTab(name) {
 
 function deleteFile(name) {
   if (!state.files[name]) return;
-  if (!window.confirm(`Excluir "${name}"?`)) return;
+  if (!state.files[name].dirty && !window.confirm(`Excluir "${name}"?`)) return;
 
   removeFileFromState(name);
 }
 
 function removeFileFromState(name) {
   if (!state.files[name]) return false;
+  if (!confirmUnsavedChanges(name)) return false;
 
   delete state.files[name];
   state.order = state.order.filter((n) => n !== name);
@@ -591,10 +608,15 @@ function addFileToState({
   if (!LANGUAGES[languageId])
     throw new Error(`Linguagem "${languageId}" não registrada.`);
 
-  const existed = Boolean(state.files[normalizedName]);
+  const previous = state.files[normalizedName];
+  const existed = Boolean(previous);
+  const nextContent = String(content ?? "");
   state.files[normalizedName] = {
     language: languageId,
-    content: String(content ?? ""),
+    content: nextContent,
+    dirty: previous
+      ? Boolean(previous.dirty || previous.content !== nextContent || (previous.loaded === false && loaded))
+      : !projectRoot,
     ...(projectRoot ? { projectRoot, loaded } : {}),
   };
   if (!existed) state.order.push(normalizedName);
@@ -602,6 +624,7 @@ function addFileToState({
   if (open) openFile(normalizedName);
   else {
     renderSidebar();
+    renderTabs();
     if (state.activeFile === normalizedName) renderEditor();
   }
   emitEditorEvent(existed ? "file-updated" : "file-added", {
@@ -622,8 +645,14 @@ function updateFileInState(name, changes) {
     state.files[name].language = update.language;
   }
   if (update.content != null) {
-    state.files[name].content = String(update.content);
-    state.files[name].loaded = true;
+    const file = state.files[name];
+    const content = String(update.content);
+    if (!file.dirty && (file.content !== content || file.loaded === false)) {
+      file.dirty = true;
+      renderTabs();
+    }
+    file.content = content;
+    file.loaded = true;
   }
   renderSidebar();
   if (state.activeFile === name) renderEditor();
@@ -662,24 +691,35 @@ function runFile() {
     renderHtmlPreview({ file: name });
     return;
   }
-
-  previewPanel.classList.add("hidden");
-  outputPanel.classList.add("hidden");
-
-  const command = buildRuntimeCommand(name, lang.id, terminalDirectory);
+  if (pendingTerminalRequest) {
+    openTerminal();
+    return;
+  }
   if (!isTerminalAvailable()) {
     notifyTerminalRequired();
     return;
   }
-  // Usa o mesmo caminho do terminal: preenche o input e confirma com Enter.
+  if (!window.confirm(`Executar "${name}" usando a versão salva no disco?\n\nAs alterações no editor não são salvas automaticamente. Para executá-las, cancele e salve o arquivo primeiro.`)) return;
+
+  previewPanel.classList.add("hidden");
+  outputPanel.classList.add("hidden");
+  const command = buildRuntimeCommand(name, lang.id, terminalDirectory);
+  // Reuse the terminal form's asynchronous execution, status and error handling.
   openTerminal();
-  terminalInput.value = command;
+  terminalInput.value = interactiveTerminal
+    ? `cd -- ${quoteShellArgument(terminalDirectory)} && { ${command}; }`
+    : command;
   terminalForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
 }
 
 function openTerminal(directory = terminalDirectory) {
   terminalDirectory = String(directory || "/sdcard");
   terminalPanel.classList.remove("hidden");
+  if (typeof window.Android?.openInteractiveTerminal === "function") {
+    interactiveTerminal ??= createInteractiveTerminal(terminalPanel, terminalOutput, terminalTitle, () => terminalDirectory);
+    interactiveTerminal.open();
+    terminalInput.placeholder = "comando ou entrada do programa...";
+  }
   terminalInput.focus();
 }
 
@@ -692,8 +732,17 @@ function saveActiveFile() {
     return;
   }
   const language = LANGUAGES[file.language];
-  const saved = window.Android.saveProjectFile(name, file.content, language?.mimeType || "application/octet-stream");
-  window.Android.showToast?.(saved ? `Salvo: ${name}` : "Não foi possível salvar o arquivo");
+  const content = file.content;
+  try {
+    const saved = window.Android.saveProjectFile(name, content, language?.mimeType || "application/octet-stream") === true;
+    if (saved && state.files[name] === file && file.content === content) {
+      file.dirty = false;
+      renderTabs();
+    }
+    window.Android.showToast?.(saved ? `Salvo: ${name}` : "Não foi possível salvar o arquivo");
+  } catch (error) {
+    window.Android.showToast?.(`Não foi possível salvar o arquivo: ${String(error.message || error)}`);
+  }
 }
 
 function shellQuoteWeb(value) { return `'${String(value).replace(/'/g, `'"'"'`)}'`; }
@@ -1009,12 +1058,71 @@ async function exportPluginsZip() {
   URL.revokeObjectURL(url);
 }
 
-function runTerminalCommand(command, directory = terminalDirectory) {
+function requestTerminalCommand(command, directory) {
+  return new Promise((resolve) => {
+    const request = { id: null };
+    pendingTerminalRequest = request;
+    terminalForm.setAttribute("aria-busy", "true");
+    terminalTitle.textContent = "TERMINAL — Executando…";
+    const finish = (result) => {
+      if (pendingTerminalRequest !== request) return;
+      clearTimeout(timeout);
+      window.removeEventListener("android:terminal-result", onResult);
+      pendingTerminalRequest = null;
+      terminalForm.setAttribute("aria-busy", "false");
+      terminalTitle.textContent = "TERMINAL";
+      resolve(result);
+    };
+    const fail = (error) => finish({ success: false, exitCode: -1, output: "", error });
+    const onResult = ({ detail }) => {
+      if (!request.id || detail?.requestId !== request.id) return;
+      if (typeof detail.success !== "boolean" || !Number.isFinite(detail.exitCode) ||
+          typeof detail.output !== "string" || typeof detail.error !== "string") {
+        fail("Resposta inválida do terminal.");
+        return;
+      }
+      finish(parseRunResult(JSON.stringify(detail)));
+    };
+    const timeout = setTimeout(() => {
+      fail("Tempo limite de resposta excedido. O comando pode ainda estar em execução.");
+    }, terminalRequestTimeoutMs);
+    window.addEventListener("android:terminal-result", onResult);
+    try {
+      if (typeof window.Android?.runTerminalCommandAsync !== "function") {
+        fail("Terminal assíncrono indisponível. Atualize o aplicativo Android.");
+        return;
+      }
+      const acknowledgement = JSON.parse(window.Android.runTerminalCommandAsync(command, directory));
+      if (acknowledgement?.accepted !== true) {
+        fail(String(acknowledgement?.error || "O terminal não aceitou o comando."));
+        return;
+      }
+      if (typeof acknowledgement.requestId !== "string" || !acknowledgement.requestId) {
+        fail("Identificador de solicitação inválido do terminal.");
+        return;
+      }
+      request.id = acknowledgement.requestId;
+    } catch (error) {
+      fail(`Erro ao solicitar comando: ${String(error)}`);
+    }
+  });
+}
+
+// Existing plugins keep their synchronous result contract; the terminal form opts in to async.
+function runTerminalCommand(command, directory = terminalDirectory, { asynchronous = false } = {}) {
+  if (pendingTerminalRequest) {
+    const result = { success: false, exitCode: -1, output: "", error: "Já existe um comando em execução no terminal." };
+    return asynchronous ? Promise.resolve(result) : result;
+  }
+  const targetDirectory = String(directory || terminalDirectory || "/sdcard");
+  if (asynchronous) {
+    openTerminal(targetDirectory);
+    return requestTerminalCommand(command, targetDirectory);
+  }
   if (!window.Android || typeof window.Android.runTerminalCommand !== "function") {
     notifyTerminalRequired();
     return { success: false, exitCode: -1, output: "", error: "Terminal Debian indisponível no Android." };
   }
-  const targetDirectory = String(directory || terminalDirectory || "/sdcard");
   openTerminal(targetDirectory);
   return parseRunResult(window.Android.runTerminalCommand(command, targetDirectory));
 }
@@ -1023,12 +1131,25 @@ function isTerminalAvailable() {
   return Boolean(window.Android && typeof window.Android.isTerminalAvailable === "function" && window.Android.isTerminalAvailable());
 }
 
+function appendTerminalOutput(text) {
+  const previous = terminalOutput.textContent;
+  const alreadyTruncated = previous.startsWith(terminalHistoryNotice);
+  const truncated = alreadyTruncated || previous.length + text.length > terminalHistoryLimit;
+  const capacity = terminalHistoryLimit - (truncated ? terminalHistoryNotice.length : 0);
+  const content = (alreadyTruncated ? previous.slice(terminalHistoryNotice.length) : previous) +
+    text.slice(-terminalHistoryLimit);
+  let start = Math.max(0, content.length - capacity);
+  if (start > 0 && /[\uD800-\uDBFF]/.test(content[start - 1]) &&
+      /[\uDC00-\uDFFF]/.test(content[start])) start++;
+  terminalOutput.textContent = (truncated ? terminalHistoryNotice : "") + content.slice(start);
+}
+
 function notifyTerminalRequired() {
   const message = "Terminal Debian não instalado ou desconectado. Instale e abra o LunusDroid para executar código.";
   outputPanel.classList.remove("hidden");
   outputContent.textContent = message;
   terminalPanel.classList.remove("hidden");
-  terminalOutput.textContent += `${terminalOutput.textContent ? "\n" : ""}[terminal] ${message}\n`;
+  appendTerminalOutput(`${terminalOutput.textContent ? "\n" : ""}[terminal] ${message}\n`);
   window.Android?.showToast?.(message);
 }
 
@@ -1039,19 +1160,25 @@ window.addPluginFromPrompt = addPluginFromPrompt;
 window.choosePluginZip = choosePluginZip;
 window.openPluginList = openPluginList;
 window.exportPluginsZip = exportPluginsZip;
-window.addEventListener("android:project-loading", () => {
-  state.files = {};
-  state.order = [];
-  state.openTabs = [];
-  state.activeFile = null;
-  renderSidebar();
-  renderTabs();
-  renderEditor();
+let approvedProjectChanges = null;
+window.confirmProjectReplacement = () => {
+  const dirtyFiles = Object.entries(state.files).filter(([, file]) => file.dirty);
+  const changes = JSON.stringify(dirtyFiles);
+  if (dirtyFiles.length && changes !== approvedProjectChanges && !window.confirm(
+    `Há alterações não salvas em ${dirtyFiles.length} arquivo(s). Abrir outro projeto descartará essas alterações. Deseja continuar?`,
+  )) return false;
+  approvedProjectChanges = changes;
+  return true;
+};
+// Keep the current project usable until Android has successfully loaded its replacement.
+window.addEventListener("android:project-cancelled", () => {
+  approvedProjectChanges = null;
 });
 window.addEventListener("android:project-opened", (event) => {
+  if (!Array.isArray(event.detail?.files)) return;
+  approvedProjectChanges = null;
   const directory = event.detail?.terminalDirectory;
   if (directory) terminalDirectory = directory;
-  if (!Array.isArray(event.detail?.files)) return;
   // Replace the previous project so files with the same name cannot be mixed.
   state.files = {};
   state.order = [];
@@ -1062,6 +1189,7 @@ window.addEventListener("android:project-opened", (event) => {
     state.files[name] = {
       language: getLanguageByExtension(name, LANGUAGES),
       content: "",
+      dirty: false,
       loaded: false,
       projectRoot: file.projectRoot || event.detail.rootUri,
     };
@@ -1683,24 +1811,33 @@ pluginList.addEventListener("click", (event) => {
   if (button) uninstallPlugin(button.dataset.removePlugin);
 });
 document.getElementById("btnCloseTerminal").addEventListener("click", () => terminalPanel.classList.add("hidden"));
-terminalForm.addEventListener("submit", (event) => {
+terminalForm.addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (typeof window.Android?.openInteractiveTerminal === "function") {
+    openTerminal();
+    if (interactiveTerminal.write(terminalInput.value + "\r")) terminalInput.value = "";
+    return;
+  }
+  if (pendingTerminalRequest) return;
   const command = terminalInput.value.trim();
   if (!command) return;
-  terminalOutput.textContent += `${terminalOutput.textContent ? "\n" : ""}${terminalDirectory} $ ${command}\n`;
+  appendTerminalOutput(`${terminalOutput.textContent ? "\n" : ""}${terminalDirectory} $ ${command}\n`);
   terminalInput.value = "";
   try {
-    const result = runTerminalCommand(command);
-    if (result.output) terminalOutput.textContent += `${result.output}\n`;
-    if (result.error) terminalOutput.textContent += `${result.error}\n`;
-    if (!result.success) terminalOutput.textContent += `[exit ${result.exitCode}]\n`;
+    const result = await runTerminalCommand(command, terminalDirectory, { asynchronous: true });
+    if (result.output) appendTerminalOutput(`${result.output}\n`);
+    if (result.error) appendTerminalOutput(`${result.error}\n`);
+    if (!result.success) appendTerminalOutput(`[exit ${result.exitCode}]\n`);
     // The terminal already contains the transcript; do not repeat it in Output.
     outputPanel.classList.add("hidden");
   } catch (error) {
-    terminalOutput.textContent += `Erro: ${String(error)}\n`;
+    appendTerminalOutput(`Erro: ${String(error)}\n`);
   }
   terminalOutput.scrollTop = terminalOutput.scrollHeight;
-  terminalInput.focus();
+  if (!terminalPanel.classList.contains("hidden") &&
+      (document.activeElement === terminalInput || document.activeElement === document.body)) {
+    terminalInput.focus();
+  }
 });
 document
   .getElementById("btnCloseOutput")
@@ -1785,7 +1922,12 @@ autocomplete.addEventListener("pointerdown", (e) => {
 
 codeInput.addEventListener("input", () => {
   if (!state.activeFile) return;
-  state.files[state.activeFile].content = codeInput.value;
+  const file = state.files[state.activeFile];
+  if (file.content !== codeInput.value && !file.dirty) {
+    file.dirty = true;
+    renderTabs();
+  }
+  file.content = codeInput.value;
   refreshHighlight();
   updateCursor();
   scheduleLint();

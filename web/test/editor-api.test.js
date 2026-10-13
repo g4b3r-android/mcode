@@ -35,7 +35,7 @@ async function getFreePort() {
   return port;
 }
 
-async function waitForPage(port, timeout = 8000) {
+async function waitForPage(port, timeout = 20000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     try {
@@ -153,7 +153,7 @@ test('bundle usa JavaScript clássico compatível com Android WebView', () => {
   );
 });
 
-test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout: 25000 }, async (t) => {
+test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout: 60000 }, async (t) => {
   const chromium = findChromium();
   if (!chromium) {
     t.skip('Chromium não está instalado. Defina CHROMIUM_PATH para executar o teste E2E.');
@@ -167,6 +167,8 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
     '--headless',
     '--no-sandbox',
     '--disable-gpu',
+    '--disable-extensions',
+    '--no-first-run',
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profileDirectory}`,
     pageUrl
@@ -386,7 +388,7 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
     assert.equal(lazy.edited, 'edição local');
     assert.equal(lazy.failed, null);
     assert.equal(lazy.activeAfterFailure, 'main.js');
-    assert.equal(lazy.filesDuringLoading, 0);
+    assert.equal(lazy.filesDuringLoading, 2);
     assert.deepEqual(lazy.reads, [
       { root: 'content://project/one', name: 'main.js' },
       { root: 'content://project/one', name: 'image.png' },
@@ -396,18 +398,279 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
   });
 
 
+  await t.test('alterações não salvas são marcadas por arquivo e só limpas após salvar', async () => {
+    const result = await devTools.evaluate(`(() => {
+      const previousAndroid = window.Android;
+      const checks = [], writes = [], reads = [];
+      const api = CodeEditorAPI;
+      const input = document.getElementById('codeInput');
+      const check = (label, name, expected) => checks.push({ label, expected,
+        dirty: api.getFiles().find(file => file.name === name).dirty,
+        indicator: Boolean([...document.querySelectorAll('#tabbar .tab')]
+          .find(tab => tab.dataset.file === name)?.querySelector('.tab-dirty')) });
+      const edit = text => { input.value = text; input.dispatchEvent(new Event('input')); };
+      try {
+        window.Android = {
+          readProjectFile: (root, name) => {
+            reads.push(name);
+            return JSON.stringify({ success: true, content: 'original' });
+          },
+          saveProjectFile: () => false,
+          showToast: () => {}
+        };
+        window.dispatchEvent(new CustomEvent('android:project-opened', { detail: {
+          rootUri: 'content://dirty-test', files: [{ name: 'a.js' }, { name: 'b.js' }]
+        }}));
+        api.addFile({ name: 'new.js', content: '', open: true });
+        check('arquivo novo', 'new.js', true);
+        api.openFile('a.js');
+        check('arquivo carregado', 'a.js', false);
+        edit('original');
+        api.updateFile('a.js', { content: 'original', language: 'javascript' });
+        check('conteúdo idêntico e metadados', 'a.js', false);
+        edit('editado');
+        check('edição pelo teclado', 'a.js', true);
+        window.saveActiveFile();
+        check('salvamento recusado', 'a.js', true);
+        window.Android.saveProjectFile = () => { throw new Error('falha de gravação'); };
+        window.saveActiveFile();
+        check('exceção ao salvar', 'a.js', true);
+        delete window.Android.saveProjectFile;
+        window.saveActiveFile();
+        check('sem bridge de gravação', 'a.js', true);
+        api.updateFile('b.js', '');
+        api.openFile('b.js');
+        check('substituição de conteúdo ainda não carregado', 'b.js', true);
+        api.openFile('a.js');
+        window.Android.saveProjectFile = (name, content, mime) => {
+          writes.push({ name, content, mime }); return true;
+        };
+        window.saveActiveFile();
+        check('salvamento confirmado', 'a.js', false);
+        check('outro arquivo continua alterado', 'b.js', true);
+        api.addFile({ name: 'a.js', content: 'editado', overwrite: true, open: false });
+        check('sobrescrita sem mudança', 'a.js', false);
+        api.addFile({ name: 'a.js', content: 'substituído', overwrite: true, open: false });
+        check('sobrescrita pela API', 'a.js', true);
+        api.updateFile('a.js', { content: 'substituído', dirty: false });
+        check('API não limpa a marca arbitrariamente', 'a.js', true);
+        const previousConfirm = window.confirm;
+        window.confirm = () => true;
+        try { document.querySelector('[data-close="a.js"]').click(); }
+        finally { window.confirm = previousConfirm; }
+        api.openFile('a.js');
+        check('fechar e reabrir aba', 'a.js', true);
+        window.Android.saveProjectFile = () => { api.updateFile('a.js', 'edição mais recente'); return true; };
+        window.saveActiveFile();
+        check('salvamento não apaga edição posterior', 'a.js', true);
+        return { checks, writes, reads };
+      } finally { window.Android = previousAndroid; }
+    })()`);
+    for (const check of result.checks) {
+      assert.equal(check.dirty, check.expected, check.label);
+      assert.equal(check.indicator, check.expected, check.label + ': indicador da aba');
+    }
+    assert.deepEqual(result.reads, ['a.js']);
+    assert.equal(result.writes.length, 1);
+    assert.equal(result.writes[0].name, 'a.js');
+    assert.equal(result.writes[0].content, 'editado');
+  });
+
+  await t.test('abas e remoções pela API protegem alterações não salvas', async () => {
+    const result = await devTools.evaluate(`(() => {
+      const previousConfirm = window.confirm;
+      const api = CodeEditorAPI;
+      const prompts = [], removed = [], checks = [];
+      let approve = false;
+      const onRemoved = event => removed.push(event.detail.name);
+      const tabs = () => [...document.querySelectorAll('#tabbar .tab')].map(tab => tab.dataset.file);
+      const snapshot = () => JSON.stringify({ files: api.getFiles(), tabs: tabs(),
+        active: api.getActiveFile(), input: document.getElementById('codeInput').value, removed });
+      const unchanged = (label, action) => {
+        const before = snapshot();
+        const value = action();
+        checks.push({ label, preserved: before === snapshot(), value });
+      };
+      window.confirm = message => { prompts.push(message); return approve; };
+      window.addEventListener('code-editor:file-removed', onRemoved);
+      try {
+        api.addFile({ name: 'protect-a.js', content: 'edição A' });
+        api.addFile({ name: 'protect-b.js', content: 'edição B' });
+        api.addFile({ name: 'protect-hidden.js', content: 'edição sem aba', open: false });
+        unchanged('cancelar fechamento de aba inativa', () =>
+          document.querySelector('[data-close="protect-a.js"]').click());
+        unchanged('cancelar fechamento de aba ativa', () =>
+          document.querySelector('[data-close="protect-b.js"]').click());
+        unchanged('cancelar remoção pela API', () => api.removeFile('protect-b.js'));
+        unchanged('cancelar remoção sem aba', () => api.removeFile('protect-hidden.js'));
+        unchanged('cancelar exclusão pela interface', () =>
+          document.querySelector('[data-delete="protect-a.js"]').click());
+        const cancelledPrompts = prompts.length;
+        approve = true;
+        document.querySelector('[data-close="protect-b.js"]').click();
+        const closed = !tabs().includes('protect-b.js');
+        const activeAfterClose = api.getActiveFile().name;
+        const retained = api.getFile('protect-b.js');
+        api.openFile('protect-b.js');
+        const reopened = api.getActiveFile();
+        const removedOpen = api.removeFile('protect-b.js');
+        const removedHidden = api.removeFile('protect-hidden.js');
+        document.querySelector('[data-delete="protect-a.js"]').click();
+        const approvedPrompts = prompts.length - cancelledPrompts;
+        const deleted = ['protect-a.js', 'protect-b.js', 'protect-hidden.js'].every(name =>
+          api.getFile(name) === null && !tabs().includes(name));
+        api.addFile({ name: 'protect-clean.js', content: 'salvo', projectRoot: 'content://project' });
+        approve = false;
+        const beforeClean = prompts.length;
+        document.querySelector('[data-close="protect-clean.js"]').click();
+        const cleanClosed = !tabs().includes('protect-clean.js');
+        api.openFile('protect-clean.js');
+        const cleanRemoved = api.removeFile('protect-clean.js');
+        const missingRemoved = api.removeFile('protect-missing.js');
+        return { checks, prompts, cancelledPrompts, approvedPrompts, closed, activeAfterClose,
+          retained, reopened, removedOpen, removedHidden, removed, deleted,
+          cleanClosed, cleanRemoved, missingRemoved, cleanPrompts: prompts.length - beforeClean };
+      } finally {
+        window.confirm = previousConfirm;
+        window.removeEventListener('code-editor:file-removed', onRemoved);
+      }
+    })()`);
+    for (const check of result.checks) assert.equal(check.preserved, true, check.label);
+    assert.equal(result.checks[2].value, false);
+    assert.equal(result.checks[3].value, false);
+    assert.equal(result.cancelledPrompts, 5);
+    assert.equal(result.approvedPrompts, 4, 'cada ação pede confirmação apenas uma vez');
+    for (const prompt of result.prompts) {
+      assert.match(prompt, /protect-.*\.js/);
+      assert.match(prompt, /alterações não salvas/);
+    }
+    assert.equal(result.closed, true);
+    assert.equal(result.activeAfterClose, 'protect-a.js');
+    assert.equal(result.retained.content, 'edição B');
+    assert.equal(result.retained.dirty, true);
+    assert.deepEqual(result.reopened, result.retained);
+    assert.equal(result.removedOpen, true);
+    assert.equal(result.removedHidden, true);
+    assert.equal(result.deleted, true);
+    assert.deepEqual(result.removed, ['protect-b.js', 'protect-hidden.js', 'protect-a.js', 'protect-clean.js']);
+    assert.equal(result.cleanClosed, true);
+    assert.equal(result.cleanRemoved, true);
+    assert.equal(result.missingRemoved, false);
+    assert.equal(result.cleanPrompts, 0);
+  });
+
+  await t.test('troca de projeto preserva edições até a confirmação e abertura concluída', async () => {
+    const result = await devTools.evaluate(`(() => {
+      const api = CodeEditorAPI;
+      const previousConfirm = window.confirm;
+      const previousAndroid = window.Android;
+      const prompts = [], checks = [];
+      let approve = false;
+      const cancelled = () => window.dispatchEvent(new CustomEvent('android:project-cancelled'));
+      const snapshot = () => JSON.stringify({ files: api.getFiles(), active: api.getActiveFile(),
+        tabs: document.getElementById('tabbar').innerHTML,
+        input: document.getElementById('codeInput').value });
+      const preserve = (label, action) => {
+        const before = snapshot();
+        const value = action();
+        checks.push({ label, preserved: before === snapshot(), value });
+      };
+      window.confirm = message => { prompts.push(message); return approve; };
+      window.Android = { readProjectFile: () => JSON.stringify({ success: true, content: 'salvo' }) };
+      try {
+        window.dispatchEvent(new CustomEvent('android:project-opened', { detail: {
+          rootUri: 'content://switch/old', files: [{ name: 'old.js' }]
+        }}));
+        api.openFile('old.js');
+        const cleanApproved = window.confirmProjectReplacement();
+        const cleanPrompts = prompts.length;
+        cancelled();
+        api.addFile({ name: 'hidden.js', content: 'não salvo', open: false });
+        preserve('recusar troca com arquivo alterado sem aba', () => window.confirmProjectReplacement());
+        cancelled();
+        approve = true;
+        preserve('aprovar abertura do seletor', () => window.confirmProjectReplacement());
+        preserve('cancelar seletor nativo', cancelled);
+        const beforeRetry = prompts.length;
+        window.confirmProjectReplacement();
+        const retryPrompts = prompts.length - beforeRetry;
+        preserve('carregamento mantém o editor', () =>
+          window.dispatchEvent(new CustomEvent('android:project-loading')));
+        preserve('falha de carregamento mantém o editor', cancelled);
+        window.confirmProjectReplacement();
+        window.dispatchEvent(new CustomEvent('android:project-loading'));
+        api.updateFile('old.js', 'edição durante carregamento');
+        approve = false;
+        preserve('rejeitar substituição após novas edições', () => window.confirmProjectReplacement());
+        cancelled();
+        approve = true;
+        window.confirmProjectReplacement();
+        window.dispatchEvent(new CustomEvent('android:project-loading'));
+        const beforeCommit = prompts.length;
+        const commitApproved = window.confirmProjectReplacement();
+        const repeatedPrompts = prompts.length - beforeCommit;
+        if (commitApproved) window.dispatchEvent(new CustomEvent('android:project-opened', { detail: {
+          rootUri: 'content://switch/new', files: [{ name: 'new.js' }]
+        }}));
+        const filesAfterCommit = api.getFiles();
+        const activeAfterCommit = api.getActiveFile();
+        const tabsAfterCommit = document.querySelectorAll('#tabbar .tab').length;
+        api.openFile('new.js');
+        api.addFile({ name: 'hidden.js', content: 'não salvo', open: false });
+        const beforeNext = prompts.length;
+        approve = false;
+        const nextApproved = window.confirmProjectReplacement();
+        return { checks, prompts, cleanApproved, cleanPrompts, retryPrompts, commitApproved,
+          repeatedPrompts, filesAfterCommit, activeAfterCommit, tabsAfterCommit,
+          nextApproved, nextPrompts: prompts.length - beforeNext };
+      } finally {
+        cancelled();
+        window.confirm = previousConfirm;
+        window.Android = previousAndroid;
+      }
+    })()`);
+    for (const check of result.checks) assert.equal(check.preserved, true, check.label);
+    assert.equal(result.checks[0].value, false);
+    assert.equal(result.checks.at(-1).value, false);
+    assert.equal(result.cleanApproved, true);
+    assert.equal(result.cleanPrompts, 0);
+    assert.equal(result.retryPrompts, 1, 'cancelamento revoga a aprovação anterior');
+    assert.equal(result.commitApproved, true);
+    assert.equal(result.repeatedPrompts, 0, 'mesmas edições não exigem confirmação repetida');
+    assert.deepEqual(result.filesAfterCommit.map(file => file.name), ['new.js']);
+    assert.equal(result.filesAfterCommit[0].projectRoot, 'content://switch/new');
+    assert.equal(result.activeAfterCommit, null);
+    assert.equal(result.tabsAfterCommit, 0);
+    assert.equal(result.nextApproved, false);
+    assert.equal(result.nextPrompts, 1);
+    for (const prompt of result.prompts) assert.match(prompt, /alterações não salvas/);
+  });
+
   await t.test('terminal mostra a saída uma vez e preserva erros', async () => {
-    const transcript = await devTools.evaluate(`(() => {
+    const transcript = await devTools.evaluate(`(async () => {
       const results = [
         { success: true, output: 'tensor([11., 22., 33.])', error: '', exitCode: 0 },
         { success: false, output: 'Traceback: exemplo', error: 'Sessão encerrada', exitCode: 1 }
       ];
-      window.Android.runTerminalCommand = () => JSON.stringify(results.shift());
+      let nextRequest = 0;
+      window.Android.runTerminalCommandAsync = () => {
+        const requestId = 'transcript-' + (++nextRequest);
+        const result = results.shift();
+        setTimeout(() => window.dispatchEvent(new CustomEvent('android:terminal-result', {
+          detail: { requestId, ...result }
+        })), 10);
+        return JSON.stringify({ requestId, accepted: true });
+      };
       const terminal = document.getElementById('terminalOutput');
       terminal.textContent = '';
       for (const command of ['python3 exemplo.py', 'python3 erro.py']) {
         document.getElementById('terminalInput').value = command;
         document.getElementById('terminalForm').dispatchEvent(new Event('submit', { cancelable: true }));
+        const deadline = Date.now() + 3000;
+        while (document.getElementById('terminalForm').getAttribute('aria-busy') === 'true') {
+          if (Date.now() > deadline) throw new Error('Terminal não concluiu o comando');
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
       }
       return { text: terminal.textContent,
         duplicateHidden: document.getElementById('outputPanel').classList.contains('hidden') };
@@ -416,6 +679,226 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
     assert.equal(transcript.text.match(/python3 exemplo.py/g)?.length, 1);
     assert(transcript.text.includes('Traceback: exemplo\nSessão encerrada\n[exit 1]'));
     assert.equal(transcript.duplicateHidden, true);
+  });
+
+  await t.test('histórico do terminal limita saída longa e mantém erro e status recentes', async () => {
+    const result = await devTools.evaluate(`(async () => {
+      const output = document.getElementById('terminalOutput');
+      const input = document.getElementById('terminalInput');
+      const form = document.getElementById('terminalForm');
+      output.textContent = '';
+      let request = 0;
+      window.Android.runTerminalCommandAsync = () => {
+        const requestId = 'retention-' + (++request);
+        setTimeout(() => window.dispatchEvent(new CustomEvent('android:terminal-result', {
+          detail: { requestId, success: false, exitCode: 127,
+            output: '😀'.repeat(180000) + 'última saída', error: 'Serviço desconectado' }
+        })), 0);
+        return JSON.stringify({ accepted: true, requestId });
+      };
+      const lengths = [];
+      const observer = new MutationObserver(() => lengths.push(output.textContent.length));
+      observer.observe(output, { childList: true });
+      try {
+        for (let i = 0; i < 5; i++) {
+          input.value = 'long output';
+          form.dispatchEvent(new Event('submit', { cancelable: true }));
+          const deadline = Date.now() + 3000;
+          while (form.getAttribute('aria-busy') === 'true') {
+            if (Date.now() > deadline) throw new Error('Terminal não concluiu');
+            await new Promise(resolve => setTimeout(resolve, 10));
+          }
+        }
+        return { text: output.textContent, lengths, wellFormed: output.textContent.isWellFormed() };
+      } finally { observer.disconnect(); }
+    })()`);
+    assert(result.lengths.length > 0);
+    assert(result.lengths.every(length => length <= 128 * 1024));
+    assert(result.text.startsWith('[terminal] Histórico truncado;'));
+    assert.equal(result.text.match(/Histórico truncado/g)?.length, 1);
+    assert(result.text.endsWith('última saída\nServiço desconectado\n[exit 127]\n'));
+    assert.equal(result.wellFormed, true);
+  });
+
+  await t.test('terminal assíncrono correlaciona respostas, bloqueia duplicatas e recupera falhas', async () => {
+    const result = await devTools.evaluate(`(async () => {
+      const form = document.getElementById('terminalForm');
+      const input = document.getElementById('terminalInput');
+      const output = document.getElementById('terminalOutput');
+      const title = document.querySelector('#terminalPanel .output-header span');
+      const busy = () => form.getAttribute('aria-busy') === 'true';
+      const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+      const calls = [];
+      let syncCalls = 0;
+      window.Android.runTerminalCommand = () => { syncCalls++; throw new Error('Must not block'); };
+      window.Android.runTerminalCommandAsync = (command, directory) => {
+        const requestId = 'request-' + (calls.length + 1);
+        calls.push({ command, directory, requestId });
+        return JSON.stringify({ requestId, accepted: true });
+      };
+      const send = command => {
+        input.value = command;
+        form.dispatchEvent(new Event('submit', { cancelable: true }));
+      };
+      const respond = (requestId, extra = {}) => window.dispatchEvent(new CustomEvent('android:terminal-result', {
+        detail: { requestId, success: true, exitCode: 0, output: 'finished', error: '', ...extra }
+      }));
+      send('long command');
+      const running = busy() && title.textContent.includes('Executando');
+      send('next typed command');
+      let heartbeat = false;
+      await new Promise(resolve => setTimeout(() => { heartbeat = true; resolve(); }, 10));
+      respond('unrelated-id', { output: 'WRONG RESPONSE' });
+      await tick();
+      const stillRunning = busy();
+      const retainedInput = input.value;
+      const editor = document.getElementById('codeInput');
+      editor.focus();
+      respond('request-1');
+      await tick();
+      const focusPreserved = document.activeElement === editor;
+      const finished = !busy() && title.textContent === 'TERMINAL';
+      respond('request-1', { output: 'DUPLICATE RESPONSE' });
+      send('second command');
+      respond('request-1', { output: 'LATE RESPONSE' });
+      const ignoredLate = busy();
+      respond('request-2', { success: false, exitCode: -1, output: 'partial output', error: 'Serviço LunusDroid desconectado.' });
+      await tick();
+      const disconnected = !busy() && output.textContent.includes('partial output\\nServiço LunusDroid desconectado.\\n[exit -1]');
+
+      const nativeSetTimeout = window.setTimeout;
+      let expire;
+      window.setTimeout = (callback, delay, ...args) => {
+        if (delay === 615000) expire = callback;
+        return nativeSetTimeout(callback, delay, ...args);
+      };
+      try { send('lost result'); } finally { window.setTimeout = nativeSetTimeout; }
+      if (!expire) throw new Error('Timeout do terminal não registrado');
+      expire();
+      await tick();
+      const timedOut = !busy() && output.textContent.includes('Tempo limite de resposta excedido');
+      respond('request-3', { output: 'TIMED OUT RESPONSE' });
+
+      const failureStates = [];
+      for (const implementation of [
+        () => JSON.stringify({ requestId: 'rejected', accepted: false, error: 'Editor indisponível' }),
+        () => { throw new Error('Bridge failure'); },
+        () => 'not json',
+        () => JSON.stringify({ accepted: true }),
+        undefined,
+      ]) {
+        window.Android.runTerminalCommandAsync = implementation;
+        send('rejected command');
+        await tick();
+        failureStates.push(!busy());
+      }
+      window.Android.runTerminalCommandAsync = () => JSON.stringify({ requestId: 'malformed', accepted: true });
+      send('malformed result');
+      respond('malformed', { output: null });
+      await tick();
+      const malformed = !busy() && output.textContent.includes('Resposta inválida do terminal');
+      return { calls, syncCalls, running, heartbeat, stillRunning, retainedInput, focusPreserved,
+        finished, ignoredLate, disconnected, timedOut, failureStates, malformed, text: output.textContent };
+    })()`);
+    assert.equal(result.calls.length, 3);
+    assert.equal(result.calls[0].command, 'long command');
+    assert.equal(result.syncCalls, 0);
+    assert.equal(result.retainedInput, 'next typed command');
+    for (const key of ['running', 'heartbeat', 'stillRunning', 'focusPreserved', 'finished', 'ignoredLate', 'disconnected', 'timedOut', 'malformed']) {
+      assert.equal(result[key], true, key);
+    }
+    assert(result.failureStates.every(Boolean));
+    assert.doesNotMatch(result.text, /WRONG RESPONSE|DUPLICATE RESPONSE|LATE RESPONSE|TIMED OUT RESPONSE/);
+    assert.equal(result.text.match(/long command/g)?.length, 1);
+    assert.match(result.text, /Editor indisponível/);
+    assert.match(result.text, /Bridge failure/);
+    assert.match(result.text, /Identificador de solicitação inválido/);
+    assert.match(result.text, /Atualize o aplicativo Android/);
+  });
+
+  await t.test('Run confirma a versão do disco e reutiliza o terminal assíncrono', async () => {
+    const result = await devTools.evaluate(`(async () => {
+      const calls = [], prompts = [];
+      let approve = false, saves = 0;
+      const originalConfirm = window.confirm;
+      const originalAndroid = window.Android;
+      window.confirm = message => { prompts.push(message); return approve; };
+      window.Android = {
+        isTerminalAvailable: () => true,
+        saveProjectFile: () => { saves++; return true; },
+        runTerminalCommand: () => { throw new Error('Run não deve usar a bridge síncrona'); },
+        runTerminalCommandAsync: (command, directory) => {
+          const requestId = 'run-' + (calls.length + 1);
+          calls.push({ requestId, command, directory });
+          return JSON.stringify({ requestId, accepted: true });
+        }
+      };
+      const button = document.getElementById('btnRun');
+      const input = document.getElementById('terminalInput');
+      const form = document.getElementById('terminalForm');
+      const output = document.getElementById('terminalOutput');
+      const tick = () => new Promise(resolve => setTimeout(resolve, 0));
+      const complete = (extra = {}) => window.dispatchEvent(new CustomEvent('android:terminal-result', {
+        detail: { requestId: calls.at(-1).requestId, success: true, exitCode: 0, output: 'run finished', error: '', ...extra }
+      }));
+      try {
+        window.openTerminal('/sdcard/project');
+        CodeEditorAPI.addFile({ name: 'run-test.py', language: 'python', content: 'unsaved edit', open: true });
+        input.value = 'keep my terminal draft';
+        button.click();
+        const cancelled = calls.length === 0 && input.value === 'keep my terminal draft';
+        approve = true;
+        button.click();
+        const running = form.getAttribute('aria-busy') === 'true';
+        const promptsBeforeDuplicate = prompts.length;
+        input.value = 'next terminal command';
+        button.click();
+        const duplicateBlocked = calls.length === 1 && prompts.length === promptsBeforeDuplicate && input.value === 'next terminal command';
+        let responsive = false;
+        await new Promise(resolve => setTimeout(() => { responsive = true; resolve(); }, 10));
+        complete({ success: false, exitCode: 2, output: 'python output', error: 'execution failed' });
+        await tick();
+        const failure = output.textContent.includes('python output\\nexecution failed\\n[exit 2]') && form.getAttribute('aria-busy') === 'false';
+        CodeEditorAPI.addLanguage({ id: 'bash', label: 'Bash', extensions: ['sh'] });
+        const variants = [
+          ['run-test.js', 'javascript'], ['run-test.sh', 'bash'], ['RunTest.java', 'java']
+        ];
+        for (const [name, language] of variants) {
+          CodeEditorAPI.addFile({ name, language, content: 'edited content', open: true });
+          button.click();
+          complete();
+          await tick();
+        }
+        const beforeHtml = { calls: calls.length, prompts: prompts.length };
+        CodeEditorAPI.addFile({ name: 'run-preview.html', language: 'html', content: '<h1>Unsaved preview</h1>', open: true });
+        button.click();
+        const preview = document.getElementById('htmlPreview');
+        return { calls, prompts, saves, cancelled, running, duplicateBlocked, responsive, failure,
+          htmlContent: preview.srcdoc, sandbox: preview.getAttribute('sandbox'),
+          htmlVisible: !document.getElementById('previewPanel').classList.contains('hidden'),
+          htmlSkippedBridge: calls.length === beforeHtml.calls && prompts.length === beforeHtml.prompts,
+          unchanged: CodeEditorAPI.getFile('run-test.py').content };
+      } finally {
+        window.confirm = originalConfirm;
+        window.Android = originalAndroid;
+      }
+    })()`);
+    for (const key of ['cancelled', 'running', 'duplicateBlocked', 'responsive', 'failure', 'htmlVisible', 'htmlSkippedBridge']) {
+      assert.equal(result[key], true, key);
+    }
+    assert.equal(result.saves, 0);
+    assert.equal(result.unchanged, 'unsaved edit');
+    assert.match(result.prompts[0], /versão salva no disco/);
+    assert.match(result.prompts[0], /cancele e salve/);
+    assert.deepEqual(result.calls.map(({ command }) => command), [
+      "unset PREFIX; python3 '/sdcard/project/run-test.py'",
+      "unset PREFIX; node '/sdcard/project/run-test.js'",
+      "unset PREFIX; bash '/sdcard/project/run-test.sh'",
+      "unset PREFIX; javac '/sdcard/project/RunTest.java' && java '/sdcard/project/RunTest'"
+    ]);
+    assert(result.calls.every(({ directory }) => directory === '/sdcard/project'));
+    assert.equal(result.htmlContent, '<h1>Unsaved preview</h1>');
+    assert.equal(result.sandbox, 'allow-scripts allow-modals');
   });
 
   await t.test('configurações personalizam o editor e persistem após recarregar', async () => {
@@ -678,6 +1161,65 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
     } finally {
       await devTools.command('Page.removeScriptToEvaluateOnNewDocument', { identifier });
     }
+  });
+
+  await t.test('terminal interativo transmite logs antes do encerramento e aceita entrada contínua', async () => {
+    const result = await devTools.evaluate(String.raw`(async () => {
+      const calls = { opens: [], writes: [], sizes: [], closes: [] };
+      let state = 'open';
+      let text = '\u001b[32mServing HTTP\u001b[0m\r\n';
+      window.Android = { ...window.Android,
+        openInteractiveTerminal: (...args) => { calls.opens.push(args); state = 'open'; return true; },
+        writeInteractiveTerminal: (...args) => { calls.writes.push(args); return true; },
+        resizeInteractiveTerminal: (...args) => { calls.sizes.push(args); return true; },
+        closeInteractiveTerminal: id => { calls.closes.push(id); state = 'closed'; return true; },
+        readInteractiveTerminal: () => {
+          const output = text; text = '';
+          return JSON.stringify({ state, output, exitCode: 0, more: false, error: '' });
+        }
+      };
+      window.openTerminal();
+      const waitFor = async predicate => {
+        const deadline = Date.now() + 3000;
+        while (!predicate()) {
+          if (Date.now() > deadline) throw new Error('Terminal interativo não atualizou');
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+      };
+      const screen = () => document.querySelector('.xterm-rows')?.textContent || '';
+      await waitFor(() => screen().includes('Serving HTTP'));
+      const streamedBeforeExit = state === 'open';
+      const input = document.getElementById('terminalInput');
+      const form = document.getElementById('terminalForm');
+      for (const command of ['python3 -m http.server', 'answer', '']) {
+        input.value = command;
+        form.dispatchEvent(new Event('submit', { cancelable: true }));
+      }
+      const controls = [...document.querySelectorAll('#terminalPanel button')];
+      controls.find(button => button.textContent === 'Ctrl+C').click();
+      window.openTerminal('/sdcard/new project');
+      window.Android.isTerminalAvailable = () => true;
+      CodeEditorAPI.addFile({ name: 'interactive-run.py', language: 'python', content: 'print(1)', open: true });
+      const savedConfirm = window.confirm;
+      window.confirm = () => true;
+      try { document.getElementById('btnRun').click(); }
+      finally { window.confirm = savedConfirm; }
+      text = 'GET / 200\r\n';
+      await waitFor(() => screen().includes('GET / 200'));
+      const container = document.querySelector('[aria-label="Terminal interativo"]');
+      container.style.height = '150px';
+      await waitFor(() => calls.sizes.length > 0);
+      controls.find(button => button.textContent === 'Encerrar sessão').click();
+      await waitFor(() => screen().includes('Sessão encerrada'));
+      return { calls, streamedBeforeExit, screen: screen() };
+    })()`);
+    assert.equal(result.streamedBeforeExit, true);
+    assert.equal(result.calls.opens.length, 1);
+    assert.deepEqual(result.calls.writes.slice(0, 4).map(call => call[1]), ['python3 -m http.server\r', 'answer\r', '\r', '\x03']);
+    assert.equal(result.calls.writes[4][1], "cd -- '/sdcard/new project' && { unset PREFIX; python3 '/sdcard/new project/interactive-run.py'; }\r");
+    assert.equal(result.calls.closes.length, 1);
+    assert(result.calls.sizes.every(call => call[1] >= 2 && call[2] >= 2));
+    assert(result.screen.includes('GET / 200'));
   });
 
 });

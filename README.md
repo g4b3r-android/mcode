@@ -29,6 +29,17 @@ The Android APK is written to
 `app/build/outputs/apk/release/app-release-unsigned.apk`. It is unsigned and
 must be signed with your own release key before distribution or installation.
 
+## Run on the emulator
+
+Build, install, and launch the app on the `medium_phone` AVD:
+
+```bash
+run-app
+```
+
+The command is installed in `/home/server/bin` and starts the AVD if needed.
+Override its name with `ANDROID_AVD_NAME`.
+
 ## Release
 
 Source releases are published on the

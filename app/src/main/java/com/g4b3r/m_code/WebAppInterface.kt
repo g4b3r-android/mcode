@@ -18,6 +18,25 @@ class WebAppInterface(
     }
 
     @JavascriptInterface
+    fun openInteractiveTerminal(id: String, directory: String, rows: Int, cols: Int): Boolean =
+        activity?.openInteractiveTerminal(id, directory, rows, cols) == true
+
+    @JavascriptInterface
+    fun writeInteractiveTerminal(id: String, data: String): Boolean =
+        activity?.interactiveTerminal?.write(id, data) == true
+
+    @JavascriptInterface
+    fun resizeInteractiveTerminal(id: String, rows: Int, cols: Int): Boolean =
+        activity?.interactiveTerminal?.resize(id, rows, cols) == true
+
+    @JavascriptInterface
+    fun closeInteractiveTerminal(id: String): Boolean = activity?.interactiveTerminal?.close(id) == true
+
+    @JavascriptInterface
+    fun readInteractiveTerminal(id: String): String = activity?.interactiveTerminal?.read(id)
+        ?: "{\"state\":\"closed\",\"error\":\"App indisponível.\",\"output\":\"\",\"more\":false}"
+
+    @JavascriptInterface
     fun showToast(toast: String) {
         android.os.Handler(android.os.Looper.getMainLooper()).post {
             Toast.makeText(mContext, toast, Toast.LENGTH_SHORT).show()

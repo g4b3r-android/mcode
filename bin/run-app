@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PROJECT_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+AVD_NAME="${ANDROID_AVD_NAME:-medium_phone}"
+ANDROID_CMD="${ANDROID_CLI:-android}"
+
+if ! command -v "$ANDROID_CMD" >/dev/null 2>&1; then
+    printf 'Erro: comando Android CLI não encontrado: %s\n' "$ANDROID_CMD" >&2
+    exit 1
+fi
+
+SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+if [[ -z "$SDK_ROOT" && -f "$PROJECT_ROOT/local.properties" ]]; then
+    SDK_ROOT="$(sed -n 's/^sdk\.dir=//p' "$PROJECT_ROOT/local.properties" | head -n 1)"
+fi
+if [[ -z "$SDK_ROOT" || ! -x "$SDK_ROOT/platform-tools/adb" ]]; then
+    printf 'Erro: não encontrei o adb; configure ANDROID_SDK_ROOT ou ANDROID_HOME.\n' >&2
+    exit 1
+fi
+ADB="$SDK_ROOT/platform-tools/adb"
+
+find_avd_serial() {
+    local serial avd
+    while IFS= read -r serial; do
+        avd="$("$ADB" -s "$serial" emu avd name 2>/dev/null | sed -n '1p' | tr -d '\r')"
+        if [[ "$avd" == "$AVD_NAME" ]]; then
+            printf '%s\n' "$serial"
+            return 0
+        fi
+    done < <("$ADB" devices | awk 'NR > 1 && $2 == "device" && $1 ~ /^emulator-/ { print $1 }')
+    return 1
+}
+
+if ! DEVICE="$(find_avd_serial)"; then
+    printf 'Iniciando emulador %s...\n' "$AVD_NAME"
+    "$ANDROID_CMD" emulator start "$AVD_NAME"
+    DEVICE="$(find_avd_serial)" || {
+        printf 'Erro: o emulador %s iniciou, mas não foi encontrado no adb.\n' "$AVD_NAME" >&2
+        exit 1
+    }
+fi
+
+cd "$PROJECT_ROOT"
+./gradlew :app:assembleDebug
+
+APK="$PROJECT_ROOT/app/build/outputs/apk/debug/app-debug.apk"
+if [[ ! -f "$APK" ]]; then
+    printf 'Erro: APK de debug não encontrado: %s\n' "$APK" >&2
+    exit 1
+fi
+
+"$ANDROID_CMD" run --device="$DEVICE" --apks="$APK"
