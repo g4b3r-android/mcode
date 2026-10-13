@@ -4,22 +4,75 @@ import '@xterm/xterm/css/xterm.css';
 
 // The native bridge drains bounded batches; wait for xterm before requesting more.
 export function createInteractiveTerminal(panel, legacyOutput, title, getDirectory) {
+  const resizeHandle = document.createElement('div');
+  resizeHandle.className = 'terminal-resize-handle';
+  resizeHandle.setAttribute('role', 'separator');
+  resizeHandle.setAttribute('aria-label', 'Redimensionar altura do terminal');
+  resizeHandle.setAttribute('aria-orientation', 'horizontal');
+  resizeHandle.setAttribute('aria-valuemin', '160');
+  resizeHandle.setAttribute('aria-valuemax', '620');
+  resizeHandle.setAttribute('tabindex', '0');
+  panel.prepend(resizeHandle);
+
   const container = document.createElement('div');
-  container.style.cssText = 'height:220px;min-height:100px;padding:4px 10px;overflow:hidden';
+  container.className = 'interactive-terminal-screen';
   container.setAttribute('aria-label', 'Terminal interativo');
   legacyOutput.before(container);
   legacyOutput.hidden = true;
   const term = new Terminal({ scrollback: 1000, fontSize: 14, cursorBlink: true,
-    theme: { background: '#111111' } });
+    theme: { background: '#15171a', foreground: '#d7dae0', cursor: '#58c4dc',
+      selectionBackground: '#264f78' } });
   const fit = new FitAddon();
   term.loadAddon(fit);
   term.open(container);
-  panel.querySelector('.output-header').style.flexWrap = 'wrap';
+  let resizeStart = null;
   let id = null;
   let timer = null;
   let sequence = 0;
   let directory = getDirectory();
   const status = message => term.write(`\r\n[terminal] ${message}\r\n`);
+  function heightLimits() {
+    return { min: 160, max: Math.max(160, Math.min(620, window.innerHeight * 0.65)) };
+  }
+  function setHeight(height) {
+    const { min, max } = heightLimits();
+    const next = Math.round(Math.max(min, Math.min(max, height)));
+    panel.style.height = `${next}px`;
+    resizeHandle.setAttribute('aria-valuenow', String(next));
+    resizeHandle.setAttribute('aria-valuemax', String(Math.round(max)));
+  }
+  function resizeStartPointer(event) {
+    if (event.button !== 0) return;
+    resizeStart = { y: event.clientY, height: panel.getBoundingClientRect().height };
+    resizeHandle.classList.add('active');
+    if (event.isTrusted) resizeHandle.setPointerCapture(event.pointerId);
+    event.preventDefault();
+  }
+  function resizePointer(event) {
+    if (!resizeStart) return;
+    setHeight(resizeStart.height + resizeStart.y - event.clientY);
+  }
+  function resizeEnd(event) {
+    if (!resizeStart) return;
+    resizeStart = null;
+    resizeHandle.classList.remove('active');
+    if (resizeHandle.hasPointerCapture(event.pointerId)) resizeHandle.releasePointerCapture(event.pointerId);
+  }
+  resizeHandle.addEventListener('pointerdown', resizeStartPointer);
+  resizeHandle.addEventListener('pointermove', resizePointer);
+  resizeHandle.addEventListener('pointerup', resizeEnd);
+  resizeHandle.addEventListener('pointercancel', resizeEnd);
+  resizeHandle.addEventListener('keydown', event => {
+    const { min, max } = heightLimits();
+    const current = panel.getBoundingClientRect().height;
+    if (event.key === 'ArrowUp') setHeight(current + 24);
+    else if (event.key === 'ArrowDown') setHeight(current - 24);
+    else if (event.key === 'Home') setHeight(min);
+    else if (event.key === 'End') setHeight(max);
+    else return;
+    event.preventDefault();
+  });
+  setHeight(Math.min(340, Math.max(180, window.innerHeight * 0.32)));
   function resize() {
     if (panel.classList.contains('hidden')) return;
     const size = Number.parseFloat(getComputedStyle(legacyOutput).fontSize);
@@ -86,8 +139,9 @@ export function createInteractiveTerminal(panel, legacyOutput, title, getDirecto
   observer.observe(container);
   function button(label, action) {
     const element = document.createElement('button');
-    element.className = 'icon-btn small';
+    element.className = 'icon-btn small terminal-action';
     element.textContent = label;
+    element.title = label;
     element.type = 'button';
     element.addEventListener('click', action);
     panel.querySelector('.output-header').appendChild(element);

@@ -1207,11 +1207,19 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
       text = 'GET / 200\r\n';
       await waitFor(() => screen().includes('GET / 200'));
       const container = document.querySelector('[aria-label="Terminal interativo"]');
-      container.style.height = '150px';
+      const splitter = document.querySelector('.terminal-resize-handle');
+      const initialHeight = document.getElementById('terminalPanel').getBoundingClientRect().height;
+      splitter.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }));
+      const keyboardHeight = document.getElementById('terminalPanel').getBoundingClientRect().height;
+      splitter.dispatchEvent(new PointerEvent('pointerdown', { button: 0, pointerId: 1, clientY: 200, bubbles: true }));
+      splitter.dispatchEvent(new PointerEvent('pointermove', { button: 0, pointerId: 1, clientY: 180, bubbles: true }));
+      splitter.dispatchEvent(new PointerEvent('pointerup', { button: 0, pointerId: 1, clientY: 180, bubbles: true }));
+      const draggedHeight = document.getElementById('terminalPanel').getBoundingClientRect().height;
       await waitFor(() => calls.sizes.length > 0);
       controls.find(button => button.textContent === 'Encerrar sessão').click();
       await waitFor(() => screen().includes('Sessão encerrada'));
-      return { calls, streamedBeforeExit, screen: screen() };
+      return { calls, streamedBeforeExit, screen: screen(), initialHeight, keyboardHeight, draggedHeight,
+        ariaHeight: Number(splitter.getAttribute('aria-valuenow')) };
     })()`);
     assert.equal(result.streamedBeforeExit, true);
     assert.equal(result.calls.opens.length, 1);
@@ -1220,6 +1228,9 @@ test('CodeEditorAPI registra extensões e renderiza um projeto HTML', { timeout:
     assert.equal(result.calls.closes.length, 1);
     assert(result.calls.sizes.every(call => call[1] >= 2 && call[2] >= 2));
     assert(result.screen.includes('GET / 200'));
+    assert(result.keyboardHeight > result.initialHeight);
+    assert(result.draggedHeight > result.keyboardHeight);
+    assert.equal(result.ariaHeight, Math.round(result.draggedHeight));
   });
 
 });

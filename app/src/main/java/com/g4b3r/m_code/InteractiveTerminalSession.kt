@@ -85,6 +85,10 @@ internal class InteractiveTerminalSession {
                 if (!attached) { closeQuietly(created); return@enqueue }
                 val quotedDirectory = "'" + directory.replace("'", "'\"'\"'") + "'"
                 created.write("cd -- $quotedDirectory\n".toByteArray(Charsets.UTF_8))
+                created.write(
+                    "if [ -n \"\$BASH_VERSION\" ]; then PS1='\\[\\e[1;36m\\]\\u@\\h:\\w\\$ \\[\\e[0m\\]'; PS0=\$'\\e[0m'; fi\n"
+                        .toByteArray(Charsets.UTF_8)
+                )
             } catch (failure: Exception) {
                 fail(epoch, failure.message ?: "Falha ao abrir terminal.")
                 closeQuietly(created)

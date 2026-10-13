@@ -103,6 +103,10 @@ class AsyncTerminalBridgeTest {
         try {
             assertTrue(terminal.open(fake, "interactive", "/sdcard/a'b", 24, 80))
             assertEquals("cd -- '/sdcard/a'\"'\"'b'\n", fake.writes.poll(5, TimeUnit.SECONDS))
+            assertEquals(
+                "if [ -n \"\$BASH_VERSION\" ]; then PS1='\\[\\e[1;36m\\]\\u@\\h:\\w\\$ \\[\\e[0m\\]'; PS0=\$'\\e[0m'; fi\n",
+                fake.writes.poll(5, TimeUnit.SECONDS)
+            )
             assertTrue(terminal.write("interactive", "python3 -m http.server\n"))
             assertEquals("python3 -m http.server\n", fake.writes.poll(5, TimeUnit.SECONDS))
             val callback = fake.callback!!

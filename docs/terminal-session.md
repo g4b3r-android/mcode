@@ -25,11 +25,14 @@ dos plugins não alteram o shell do painel.
    terminar. Sob sobrecarga, o truncamento é informado visivelmente.
 3. O teclado do xterm e o campo de entrada chamam `writeInteractiveTerminal`.
    Enter também pode enviar uma linha vazia a um programa. **Ctrl+C** envia o
-   byte de interrupção ao PTY; seu efeito depende do programa ativo.
+   byte de interrupção ao PTY; seu efeito depende do programa ativo. No Bash,
+   a linha de comando usa ciano e a cor volta ao padrão antes de iniciar o
+   programa; outros shells mantêm o prompt padrão.
 4. Alterações no tamanho do painel chamam `resizeInteractiveTerminal`. O
    histórico do xterm tem até 1000 linhas, com até 300 colunas e 200 linhas
-   visíveis. A fila nativa de operações também é limitada; entradas recusadas
-   produzem aviso.
+   visíveis. Arraste a alça no topo do painel para ajustar sua altura; as setas
+   para cima/baixo também redimensionam quando a alça está em foco. A fila nativa
+   de operações também é limitada; entradas recusadas produzem aviso.
 5. **Encerrar sessão** chama `close()`; o **×** apenas oculta o painel. O fluxo
    interativo não tem timeout de dez minutos. Fechar o shell, desconectar o
    serviço ou destruir a Activity encerra o fluxo no cliente. O código de saída
